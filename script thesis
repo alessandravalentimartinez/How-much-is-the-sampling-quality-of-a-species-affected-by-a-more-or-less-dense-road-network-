@@ -1,0 +1,45 @@
+#Evaluating the impact of sampling bias on the measurement of the ecological niche
+#The aim of this thesis  is to propose a method that shows how subsampling due to roadside bias affects niche completeness.
+
+
+#install all the packages 
+
+install.packages("CAST")
+install.packages("caret")
+install.packages("sf")
+install.packages("ClimDatDownloadR")
+install.packages("devtools")
+install.packages("raster")
+install.packages("viridis")
+install.packages("virtualspecies")
+install.packages("ggplot2")
+install.packages("tidyverse")
+install.packages("terra")
+install.packages("ade4")
+install.packages("hypervolume")
+install.packages("gdata")
+install.packages("ggmap")
+install.packages("osmdata")
+install.packages("osmextract")
+
+# load packages
+library(CAST)
+library(caret)
+library(sf)
+library(ClimDatDownloadR)
+library(devtools)
+library(raster)
+library(viridis)
+library(virtualspecies)
+library(ggplot2)
+library(tidyverse)
+library(terra)
+library(ade4)
+library(hypervolume)
+library(gdata)
+library(ggmap)
+library(osmdata)
+library(osmextract)
+
+# set working directory
+setwd("my/path")
