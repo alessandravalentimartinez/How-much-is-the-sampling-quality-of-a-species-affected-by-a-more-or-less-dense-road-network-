@@ -67,10 +67,10 @@ plot(osm_aoi_roads_sicilia$geometry)
 
 ##  Download bioclimatic variables from CHELSA
 #The bioclimatic variables chosen are: 
-#Average annual temperature
-#Annual temperature range
-#Annual precipitation
-#July precipitation
+#bio1, Average annual temperature
+#bio7, Annual temperature range
+#bio13, Annual precipitation
+#bio14, July precipitation
 
 
 # Set path where the TIF files are saved
@@ -110,5 +110,130 @@ plot(mydata_sicilia$bio13, main = "Bio13 - Annual Precipitation", col = viridis:
 
 # Plot for the variable bio14 (Precipitation of July)
 plot(mydata_sicilia$bio14, main = "Bio14 - Precipitation of July", col = viridis::viridis(100))
+
+
+## Set the output directory for saving plots (for Sicilia)
+output_dir_sicilia <- "C:/tesi/plots/sicilia"
+
+# Create the output directory if it doesn't exist
+if (!dir.exists(output_dir_sicilia)) {
+  dir.create(output_dir_sicilia, recursive = TRUE)
+}
+
+# Save the plot for bio01 (Annual mean temperature) in PDF
+pdf(file = file.path(output_dir_sicilia, "Sic_Bio01 - Annual Mean Temperature.pdf"))
+plot(mydata_sicilia$bio01, main = "Bio01 - Annual Mean Temperature", col = viridis::viridis(100))
+dev.off()
+
+# Save the plot for bio07 (Annual temperature range) in PDF
+pdf(file = file.path(output_dir_sicilia, "Sic_Bio07 - Annual Temperature Range.pdf"))
+plot(mydata_sicilia$bio07, main = "Bio07 - Annual Temperature Range", col = viridis::viridis(100))
+dev.off()
+
+# Save the plot for bio13 (Annual precipitation) in PDF
+pdf(file = file.path(output_dir_sicilia, "Sic_Bio13 - Annual Precipitation.pdf"))
+plot(mydata_sicilia$bio13, main = "Bio13 - Annual Precipitation", col = viridis::viridis(100))
+dev.off()
+
+# Save the plot for bio14 (Precipitation of July) in PDF
+pdf(file = file.path(output_dir_sicilia, "Sic_Bio14 - Precipitation of July.pdf"))
+plot(mydata_sicilia$bio14, main = "Bio14 - Precipitation of July", col = viridis::viridis(100))
+dev.off()
+
+
+# ============================
+# Regione Lombardia
+# ============================
+
+# upload shapefile
+aoi_lombardia <- st_read("Lombardia.shp")
+
+# bounding box 
+aoi_bb_lombardia <- st_bbox(aoi_lombardia)
+
+# from Open Street Map select type of roads: primary, secondary, tertiary (paths)
+ht_secondary <- "secondary"
+
+# download roads from OSM: our region now is Lombardia, Italy
+osm_aoi_lombardia <- oe_get("Lombardia", stringsAsFactors = FALSE, quiet = TRUE)
+osm_aoi_roads_lombardia <- osm_aoi_lombardia[osm_aoi_lombardia$highway %in% ht_secondary, ]
+plot(osm_aoi_roads_lombardia$geometry)
+
+
+##  Download bioclimatic variables from CHELSA
+#The bioclimatic variables chosen are: 
+#bio1, Average annual temperature
+#bio7, Annual temperature range
+#bio13, Annual precipitation
+#bio14, July precipitation
+
+
+# Set path where the TIF files are saved
+tif_path <- "C:/tesi/bio/ChelsaV2.1Climatologies"
+
+# List of raster files (matching the names for specific bioclimatic variables)
+rastlist <- list.files(path = tif_path, 
+                       pattern = "CHELSA_bio_(01|07|13|14)_1981-2010_V2.1", 
+                       full.names = TRUE)
+
+# Import the TIF files into a single raster stack
+mydata <- stack(rastlist)
+
+# Change data names to match the desired variable names
+names(mydata) <- c("bio01", "bio07", "bio13", "bio14")
+
+# Convert the AOI (area of interest) to a spatial object
+aoi_sp <- sf::as_Spatial(aoi_lombardia)
+
+# Crop and mask the raster stack using the Lombardia AOI
+mydata_lombardia <- mydata %>% crop(., aoi_sp) %>% mask(., aoi_sp)
+
+# Backup the original raster stack for later use
+mydata_lombardia_backup <- mydata_lombardia
+
+
+
+## View bioclimatic variables
+# Plot for the variable bio01 (Annual mean temperature)
+plot(mydata_lombardia$bio01, main = "Bio01 - Annual Mean Temperature", col = viridis::viridis(100))
+
+# Plot for the variable bio07 (Annual temperature range)
+plot(mydata_lombardia$bio07, main = "Bio07 - Annual Temperature Range", col = viridis::viridis(100))
+
+# Plot for the variable bio13 (Annual precipitation)
+plot(mydata_lombardia$bio13, main = "Bio13 - Annual Precipitation", col = viridis::viridis(100))
+
+# Plot for the variable bio14 (Precipitation of July)
+plot(mydata_lombardia$bio14, main = "Bio14 - Precipitation of July", col = viridis::viridis(100))
+
+
+## Set the output directory for saving plots (for Lombardia)
+output_dir_lombardia <- "C:/tesi/plots/lombardia"
+
+# Create the output directory if it doesn't exist
+if (!dir.exists(output_dir_lombardia)) {
+  dir.create(output_dir_lombardia, recursive = TRUE)
+}
+
+# Save the plot for bio01 (Annual mean temperature) in PDF
+pdf(file = file.path(output_dir_lombardia, "Lomb_Bio01 - Annual Mean Temperature.pdf"))
+plot(mydata_lombardia$bio01, main = "Bio01 - Annual Mean Temperature", col = viridis::viridis(100))
+dev.off()
+
+# Save the plot for bio07 (Annual temperature range) in PDF
+pdf(file = file.path(output_dir_lombardia, "Lomb_Bio07 - Annual Temperature Range.pdf"))
+plot(mydata_lombardia$bio07, main = "Bio07 - Annual Temperature Range", col = viridis::viridis(100))
+dev.off()
+
+# Save the plot for bio13 (Annual precipitation) in PDF
+pdf(file = file.path(output_dir_lombardia, "Lomb_Bio13 - Annual Precipitation.pdf"))
+plot(mydata_lombardia$bio13, main = "Bio13 - Annual Precipitation", col = viridis::viridis(100))
+dev.off()
+
+# Save the plot for bio14 (Precipitation of July) in PDF
+pdf(file = file.path(output_dir_lombardia, "Lomb_Bio14 - Precipitation of July.pdf"))
+plot(mydata_lombardia$bio14, main = "Bio14 - Precipitation of July", col = viridis::viridis(100))
+dev.off()
+
 
 
