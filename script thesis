@@ -2,26 +2,6 @@
 #The aim of this thesis  is to propose a method that shows how subsampling due to roadside bias affects niche completeness.
 
 
-#install all the packages 
-
-install.packages("CAST")
-install.packages("caret")
-install.packages("sf")
-install.packages("ClimDatDownloadR")
-install.packages("devtools")
-install.packages("raster")
-install.packages("viridis")
-install.packages("virtualspecies")
-install.packages("ggplot2")
-install.packages("tidyverse")
-install.packages("terra")
-install.packages("ade4")
-install.packages("hypervolume")
-install.packages("gdata")
-install.packages("ggmap")
-install.packages("osmdata")
-install.packages("osmextract")
-
 # load packages
 library(CAST)
 library(caret)
@@ -271,6 +251,8 @@ presence.points_sicilia <- sampleOccurrences(new.pres,
                                      detection.probability = 1,
                                      correct.by.suitability = TRUE,
                                      plot = FALSE)
+
+#devo plottare
 
 # ============================
 # Regione Lombardia
