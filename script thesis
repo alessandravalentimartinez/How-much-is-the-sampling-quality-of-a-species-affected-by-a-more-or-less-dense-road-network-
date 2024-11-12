@@ -225,32 +225,35 @@ dev.off()
 
 ## step 1: suitability map generation
 random.sp_sicilia <- generateRandomSp(raster.stack = mydata_sicilia,
-                              convert.to.PA = FALSE,
-                              # how to combine response functions
-                              species.type = "multiplicative",
-                              # random approach between PCA and response function
-                              approach = "response",
-                              # response function
-                              relations = "gaussian",
-                              # realistic species
-                              realistic.sp = TRUE,
-                              plot = FALSE)
+                                      convert.to.PA = FALSE,
+                                      # how to combine response functions
+                                      species.type = "multiplicative",
+                                      # random approach between PCA and response function
+                                      approach = "response",
+                                      # response function
+                                      relations = "gaussian",
+                                      # realistic species
+                                      realistic.sp = TRUE,
+                                      plot = FALSE)
 
 ## step 2: Presence/Absence: requires defining the parameters alpha, beta, and species prevalence
-new.pres_sicilia <-convertToPA(random.sp,
-                       beta = "random",
-                       alpha = -0.05, plot = FALSE,
-                       species.prevalence = 0.01)
+new.pres_sicilia <-convertToPA(random.sp_sicilia,
+                               beta = "random",
+                               alpha = -0.05, plot = FALSE,
+                               species.prevalence = 0.01)
 
 ## step 3: occurences
-presence.points_sicilia <- sampleOccurrences(new.pres,
-                                     n = 200,
-                                     type = "presence only",
-                                     sample.prevalence = 0.9,
-                                     error.probability = 0,
-                                     detection.probability = 1,
-                                     correct.by.suitability = TRUE,
-                                     plot = FALSE)
+presence.points_sicilia <- sampleOccurrences(new.pres_sicilia,
+                                             n = 200,
+                                             type = "presence only",
+                                             sample.prevalence = 0.9,
+                                             error.probability = 0,
+                                             detection.probability = 1,
+                                             correct.by.suitability = TRUE,
+                                             plot = FALSE)
+
+
+
 
 #devo plottare
 
@@ -370,10 +373,10 @@ r_sicilia <- terra::rasterize(roads_vect_sicilia, raster_roads_sicilia)
 d_sicilia <- distance(r_sicilia, unit = "km")
 
 # Crop the d_sicily raster using the polygon Sicily.shp
-d_rast_sicilia <- crop(d_sicilia, Sicilia.shp)
+d_rast_sicilia <- crop(d_sicilia, aoi_sicilia)
 
 # Masks the raster to obtain only the data within the polygon Sicily
-d_rast_sicilia <- mask(d_rast_sicilia, Sicilia.shp)
+d_rast_sicilia <- mask(d_rast_sicilia, aoi_sicilia)
 
 ## plot: distance from roads
 # Creates a dataframe with raster values and coordinates
@@ -509,4 +512,197 @@ legend("topright", legend = c("Unbiased", "Biased"), col = c("black", "red"), pc
 
 
 
+## Preliminary Steps for Niche Analysis
 
+# ============================
+# Regione Lombardia
+# ============================
+
+# Z transform for hypervolume building
+for (i in 1:nlayers(mydata_lombardia)){
+  mydata_lombardia[[i]] <- (mydata_lombardia[[i]] - cellStats(mydata_lombardia[[i]], 'mean')) / cellStats(mydata_lombardia[[i]], 'sd') 
+}
+
+# Transform the raster of occurrences into a dataset and filter rows where Real = 1 and Observed = 1
+raster_occurences_lombardia <- presence.points_lombardia$sample.points %>% as.data.frame() %>% .[.$Real == 1 & .$Observed == 1, ]
+
+# Associate environmental variables with occurrences using coordinates
+values_occ_lombardia <- mydata_lombardia %>% rasterToPoints() %>% as.data.frame()
+filtered_occ_lombardia <- merge(values_occ_lombardia, raster_occurences_lombardia, by = c("x", "y"))
+
+# Remove unnecessary columns
+drops <- c("Real", "Observed", "x", "y")
+occurrences_values_lombardia <- filtered_occ_lombardia[ , !(names(filtered_occ_lombardia) %in% drops)]
+
+## Functions for Hypervolume
+
+# Hypervolume function for Lombardy
+hyp_calc_lombardia <- function(data) {
+  hv_occ <- hypervolume_gaussian(data)
+  return(hv_occ@Volume)
+}
+
+# Function to build accumulation curve with random increment in occurrences for Lombardy
+acc_curve_lombardia <- function(x, no) {
+  fx <- x %>% 
+    sample_n(size = 1) 
+  
+  ipervolumi <- 0
+  num_occurrences <- 0
+  
+  for (i in 1:1000) {
+    fx <- x %>% 
+      sample_n(size = no) %>% 
+      bind_rows(fx) %>% 
+      distinct()
+    
+    hv <- hyp_calc_lombardia(fx)
+    
+    ipervolumi <- c(ipervolumi, hv)
+    num_occurrences <- c(num_occurrences, nrow(fx))
+    
+    if(nrow(fx) == nrow(x)) {
+      break
+    }
+  }
+  
+  result <- bind_cols(iperv = ipervolumi, n_occ = num_occurrences)
+  return(list(result))
+}
+
+## Roadside bias
+# create raster with distances from roads
+roads_vect_lombardia <- terra::vect(osm_aoi_roads_lombardia$geometry)  
+
+# turn into SpatRaster object
+raster_roads_lombardia <- as(mydata_lombardia[[1]], "SpatRaster")
+
+# rasterize distances
+r_lombardia <- terra::rasterize(roads_vect_lombardia, raster_roads_lombardia)
+
+# Calculate the distance in km
+d_lombardia <- distance(r_lombardia, unit = "km")
+
+# Crop the d_lombardia raster using the polygon Lombardia.shp
+d_rast_lombardia <- crop(d_lombardia, aoi_lombardia)
+
+# Masks the raster to obtain only the data within the polygon Lombardia
+d_rast_lombardia <- mask(d_rast_lombardia, aoi_lombardia)
+
+## plot: distance from roads
+# Creates a dataframe with raster values and coordinates
+raster_df_dist_lombardia <- as.data.frame(d_rast_lombardia, xy = TRUE)
+
+# Name of the column of values to be used for filling
+value_column_lombardia <- names(raster_df_dist_lombardia)[3]
+
+#create the plot
+library(rlang)
+ggplot() +
+  # Aggiungi il raster (usando geom_tile)
+  geom_tile(data = raster_df_dist_lombardia, aes(x = x, y = y, fill = !!sym(value_column_lombardia))) +
+  # Usa la palette viridis per il riempimento del raster
+  scale_fill_viridis_c(option = "D", alpha = 1, begin = 0, end = 1) +  # Puoi cambiare "D" con altre opzioni di viridis come "A", "B", "C", ecc.
+  # Aggiungi le strade
+  geom_sf(data = osm_aoi_roads_lombardia$geometry, color = "black", size = 0.5) +
+  theme_bw() +
+  theme_minimal() +
+  labs(title = "Sampling Probability",
+       fill = "Probability (km)") +
+  coord_sf() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  ) +
+  scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +  # Formatta l'asse X
+  scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))   # Formatta l'asse Y
+
+
+
+
+
+## Extract distances
+# Create raster with distances from roads for Lombardy
+roads_vect_lombardia <- terra::vect(osm_aoi_roads_lombardia$geometry)
+
+# Use the first layer of the input raster as the base for rasterization
+raster_roads_lombardia <- as(mydata_lombardia[[1]], "SpatRaster")
+
+# Rasterize the roads
+r_lombardia <- terra::rasterize(roads_vect_lombardia, raster_roads_lombardia)
+
+# Calculate distance from road raster in km
+d_lombardia <- distance(r_lombardia, unit = "km")
+
+# Crop and mask the distance raster using the Lombardia polygon
+d_rast_lombardia <- terra::crop(d_lombardia, aoi_lombardia)
+
+# Mask the raster to retain only data within the Lombardia polygon
+d_rast_lombardia <- terra::mask(d_rast_lombardia, aoi_lombardia)
+
+# Calculate sampling probability using "lazy sampler" function
+c <- 1
+sampling_prob_lombardia <- 1 - (log(c * values(d_rast_lombardia)) / log(max(c * values(d_rast_lombardia), na.rm = TRUE)))
+
+# Replace Inf values and values greater than 1
+sampling_prob_lombardia[is.infinite(sampling_prob_lombardia)] <- 1
+sampling_prob_lombardia[sampling_prob_lombardia > 1] <- 1
+
+# Create probability raster
+prob_raster_lombardia <- terra::classify(d_rast_lombardia, cbind(values(d_rast_lombardia), sampling_prob_lombardia))
+
+# Convert to dataframe for plotting
+raster_df_prob_lombardia <- terra::as.data.frame(prob_raster_lombardia, xy = TRUE)
+
+# Plot: sampling probability map
+ggplot() +
+  geom_tile(data = raster_df_prob_lombardia, aes(x = x, y = y, fill = !!sym(names(raster_df_prob_lombardia)[3]))) +
+  scale_fill_viridis_c(option = "D", alpha = 1, begin = 0, end = 1) +  
+  geom_sf(data = osm_aoi_roads_lombardia$geometry, color = "black", size = 0.5) +
+  theme_bw() +
+  theme_minimal() +
+  labs(title = "Sampling Probability - Lombardia",
+       fill = "Probability") +
+  coord_sf() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  ) +
+  scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +
+  scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))
+
+# ============================
+# Occurrences as Points in Lombardy
+# ============================
+
+# Convert occurrence points in Lombardy into a spatial vector
+coord_occ_lombardia <- terra::vect(filtered_occ_lombardia, geom = c("x", "y"), crs = "epsg:4326")
+
+# Add probability values based on the raster and filter for biased points
+points_biased_lombardia <- coord_occ_lombardia %>%
+  cbind(terra::extract(prob_raster_lombardia, ., ID = FALSE)) %>%
+  subset(.$layer == 1)
+
+# Generate `occurrences_values_lombardia` with a random sampling (null model) for hypervolume analysis
+stop_lombardia <- ceiling(nrow(points_biased_lombardia) + 0.2 * nrow(points_biased_lombardia))  
+occurrences_values_lombardia <- occurrences_values_lombardia[sample(nrow(occurrences_values_lombardia), stop_lombardia), ]
+
+# ============================
+# Plot: Map with Unbiased and Biased Points in Lombardy
+# ============================
+
+# Generate indices from `occurrences_values_lombardia`
+indices_lombardia <- rownames(occurrences_values_lombardia)
+indices_lombardia <- as.numeric(indices_lombardia)
+filtered_coord_occ_lombardia <- coord_occ_lombardia[indices_lombardia, ]
+
+# Plot distance-based probability raster for Lombardy with unbiased and biased occurrence points
+par(mfrow = c(1, 1), mar = c(2, 2, 2, 0.5)) 
+
+plot(prob_raster_lombardia, col = viridis(500, alpha = 1, begin = 0, end = 1, direction = 1))
+points(filtered_coord_occ_lombardia, cex = 0.6)
+points(points_biased_lombardia, col = "red", cex = 0.6)
+
+# Add legend
+legend("topright", legend = c("Unbiased", "Biased"), col = c("black", "red"), pch = 19, cex = 0.8,
+       xpd = TRUE, y.intersp = 0.8, inset = c(-0.1, 0)) 
