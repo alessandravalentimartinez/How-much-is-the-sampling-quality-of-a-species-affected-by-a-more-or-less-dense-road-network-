@@ -236,4 +236,72 @@ plot(mydata_lombardia$bio14, main = "Bio14 - Precipitation of July", col = virid
 dev.off()
 
 
+## Random Virtual Species: run every time you want to create a virtual species.
+
+# ============================
+# Regione Sicilia
+# ============================
+
+
+## step 1: suitability map generation
+random.sp_sicilia <- generateRandomSp(raster.stack = mydata_sicilia,
+                              convert.to.PA = FALSE,
+                              # how to combine response functions
+                              species.type = "multiplicative",
+                              # random approach between PCA and response function
+                              approach = "response",
+                              # response function
+                              relations = "gaussian",
+                              # realistic species
+                              realistic.sp = TRUE,
+                              plot = FALSE)
+
+## step 2: Presence/Absence: requires defining the parameters alpha, beta, and species prevalence
+new.pres_sicilia <-convertToPA(random.sp,
+                       beta = "random",
+                       alpha = -0.05, plot = FALSE,
+                       species.prevalence = 0.01)
+
+## step 3: occurences
+presence.points_sicilia <- sampleOccurrences(new.pres,
+                                     n = 200,
+                                     type = "presence only",
+                                     sample.prevalence = 0.9,
+                                     error.probability = 0,
+                                     detection.probability = 1,
+                                     correct.by.suitability = TRUE,
+                                     plot = FALSE)
+
+# ============================
+# Regione Lombardia
+# ============================
+
+## step 1: suitability map generation
+random.sp_lombardia <- generateRandomSp(raster.stack = mydata_lombardia,
+                                        convert.to.PA = FALSE,
+                                        # how to combine response functions
+                                        species.type = "multiplicative",
+                                        # random approach between PCA and response function
+                                        approach = "response",
+                                        # response function
+                                        relations = "gaussian",
+                                        # realistic species
+                                        realistic.sp = TRUE,
+                                        plot = FALSE)
+
+## step 2: Presence/Absence: requires defining the parameters alpha, beta, and species prevalence
+new.pres_lombardia <- convertToPA(random.sp_lombardia,
+                                  beta = "random",
+                                  alpha = -0.05, plot = FALSE,
+                                  species.prevalence = 0.01)
+
+## step 3: occurences
+presence.points_lombardia <- sampleOccurrences(new.pres_lombardia,
+                                               n = 200,
+                                               type = "presence only",
+                                               sample.prevalence = 0.9,
+                                               error.probability = 0,
+                                               detection.probability = 1,
+                                               correct.by.suitability = TRUE,
+                                               plot = FALSE)
 
