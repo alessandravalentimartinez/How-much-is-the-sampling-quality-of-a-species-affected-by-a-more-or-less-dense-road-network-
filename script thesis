@@ -305,3 +305,226 @@ presence.points_lombardia <- sampleOccurrences(new.pres_lombardia,
                                                correct.by.suitability = TRUE,
                                                plot = FALSE)
 
+
+## Preliminary Steps for Niche Analysis
+
+# ============================
+# Regione Sicilia
+# ============================
+
+# Z transform for hypervolume building
+for (i in 1:nlayers(mydata_sicilia)){
+  mydata_sicilia[[i]] <- (mydata_sicilia[[i]] - cellStats(mydata_sicilia[[i]], 'mean')) / cellStats(mydata_sicilia[[i]], 'sd') 
+}
+
+# The raster of occurrences is transformed into a dataset, from which the rows satisfying both conditions Real = 1 and Observed = 1 are preserved
+raster_occurences <- presence.points_sicilia$sample.points %>% as.data.frame() %>% .[.$Real == 1 & .$Observed == 1, ]
+
+# The environmental variables are associated with the occurrences using their coordinates
+values_occ <- mydata_sicilia %>% rasterToPoints() %>% as.data.frame()
+filtered_occ <- merge(values_occ, raster_occurences, by = c("x", "y"))
+
+# Useless columns 
+drops <- c("Real", "Observed", "x", "y")
+occurrences_values <- filtered_occ[ , !(names(filtered_occ) %in% drops)]
+
+## Functions for Hypervolume
+
+# Hypervolume: just the hypervolume value from hypervolume_gaussian function
+hyp_calc <- function(data) {
+  hv_occ <- hypervolume_gaussian(data)
+  return(hv_occ@Volume)
+}
+
+# Function to build the accumulation curve with random increment in occurrences
+acc_curve <- function(x, no) {
+  # Starts with a random row
+  fx <- x %>% 
+    sample_n(size = 1) 
+  
+  ipervolumi <- 0
+  num_occurrences <- 0
+  
+  for (i in 1:1000) {
+    
+    # To the initial value (a row)
+    # Random values are selected
+    # They are bound to fx
+    # Unique values are kept
+    fx <- x %>% 
+      sample_n(size = no) %>% 
+      bind_rows(fx) %>% 
+      distinct()
+    
+    # Hypervolume per subset
+    hv <- hyp_calc(fx)
+    
+    # Save hypervolume & number of occurrences
+    ipervolumi <- c(ipervolumi, hv)
+    num_occurrences <- c(num_occurrences, nrow(fx))
+    
+    # Condition
+    # Stop when the subset has the same number of occurrences as the original set
+    if(nrow(fx) == nrow(x)) {
+      break
+    }
+  }
+  
+  result <- bind_cols(iperv = ipervolumi, n_occ = num_occurrences)
+  return(list(result))
+}
+
+## Roadside bias
+# create raster with distances from roads
+roads_vect_sicilia <- terra::vect(osm_aoi_roads_sicilia$geometry)  # Usa i dati delle strade della Sicilia
+
+# turn into SpatRaster object
+raster_roads_sicilia <- as(mydata_sicilia[[1]], "SpatRaster")
+
+# rasterize distances
+r_sicilia <- terra::rasterize(roads_vect_sicilia, raster_roads_sicilia)
+
+# Calculate the distance in km
+d_sicilia <- distance(r_sicilia, unit = "km")
+
+# Crop the d_sicily raster using the polygon Sicily.shp
+d_rast_sicilia <- crop(d_sicilia, Sicilia.shp)
+
+# Masks the raster to obtain only the data within the polygon Sicily
+d_rast_sicilia <- mask(d_rast_sicilia, Sicilia.shp)
+
+## plot: distance from roads
+# Creates a dataframe with raster values and coordinates
+raster_df_dist_sicilia <- as.data.frame(d_rast_sicilia, xy = TRUE)
+
+# Name of the column of values to be used for filling
+value_column_sicilia <- names(raster_df_dist_sicilia)[3]
+
+#create the plot
+library(rlang)
+ggplot() +
+  # Aggiungi il raster (usando geom_tile)
+  geom_tile(data = raster_df_dist_sicilia, aes(x = x, y = y, fill = !!sym(value_column_sicilia))) +
+  # Usa la palette viridis per il riempimento del raster
+  scale_fill_viridis_c(option = "D", alpha = 1, begin = 0, end = 1) +  # Puoi cambiare "D" con altre opzioni di viridis come "A", "B", "C", ecc.
+  # Aggiungi le strade
+  geom_sf(data = osm_aoi_roads_sicilia$geometry, color = "black", size = 0.5) +
+  theme_bw() +
+  theme_minimal() +
+  labs(title = "Sampling Probability",
+       fill = "Probability (km)") +
+  coord_sf() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  ) +
+  scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +  # Formatta l'asse X
+  scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))   # Formatta l'asse Y
+
+
+
+
+
+
+## Extract distances
+# Load the road vector and Sicily polygon
+roads_vect_sicilia <- terra::vect(osm_aoi_roads_sicilia$geometry)
+
+# Use the first layer of the input raster as the base for rasterization
+raster_roads_sicilia <- as(mydata_sicilia[[1]], "SpatRaster")
+
+# Rasterize the roads
+r_sicilia <- terra::rasterize(roads_vect_sicilia, raster_roads_sicilia)
+
+# Calculate the distance from the road raster in km
+d_sicilia <- distance(r_sicilia, unit = "km")
+
+# Crop the distance raster using the Sicily polygon
+d_rast_sicilia <- terra::crop(d_sicilia, Sicilia.shp)
+
+# Mask the raster to retain only the data within the Sicily polygon
+d_rast_sicilia <- terra::mask(d_rast_sicilia, Sicilia.shp)
+
+# Calculate the sampling probability using the "lazy sampler" function
+c <- 1
+sampling_prob_sicilia <- 1 - (log(c * values(d_rast_sicilia)) / log(max(c * values(d_rast_sicilia), na.rm = TRUE)))
+
+# Replace Inf values and values greater than 1
+sampling_prob_sicilia[is.infinite(sampling_prob_sicilia)] <- 1
+sampling_prob_sicilia[sampling_prob_sicilia > 1] <- 1
+
+# Associate sampling probabilities to the distance raster to obtain the probability raster
+prob_raster_sicilia <- terra::classify(d_rast_sicilia, cbind(values(d_rast_sicilia), sampling_prob_sicilia))
+
+# Convert to a dataframe for plotting
+raster_df_prob_sicilia <- terra::as.data.frame(prob_raster_sicilia, xy = TRUE)
+
+# Name of the values column to be used for filling
+value_column_sicilia <- names(raster_df_prob_sicilia)[3]
+
+# Create the sampling probability plot
+ggplot() +
+  # Add the raster
+  geom_tile(data = raster_df_prob_sicilia, aes(x = x, y = y, fill = !!sym(value_column_sicilia))) +
+  # Use the viridis color palette for the raster fill
+  scale_fill_viridis_c(option = "D", alpha = 1, begin = 0, end = 1) +  
+  # Add the roads
+  geom_sf(data = osm_aoi_roads_sicilia$geometry, color = "black", size = 0.5) +
+  theme_bw() +
+  theme_minimal() +
+  labs(title = "Sampling Probability",
+       fill = "Probability") +
+  coord_sf() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  ) +
+  scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +  # Format the X axis
+  scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))   # Format the Y axis
+
+
+# ============================
+# Occurrences as Points in Sicily
+# ============================
+
+# Convert occurrence points in Sicily into a spatial vector with coordinates and set CRS
+coord_occ_sicilia <- terra::vect(filtered_occ, geom = c("x", "y"), crs = "epsg:4326")
+
+# Add probability values based on the raster and filter for biased points
+points_biased_sicilia <- coord_occ_sicilia %>%
+  cbind(terra::extract(prob_raster_sicilia, ., ID = FALSE)) %>%
+  subset(.$layer == 1)
+
+# Generate `occurrences_values_sicilia` with a random sampling (null model) for hypervolume analysis
+num_sim <- 3  # Number of simulations for each species
+nrow(points_biased_sicilia)
+nrow(occurrences_values)
+stop <- ceiling(nrow(points_biased_sicilia) + 0.2 * nrow(points_biased_sicilia))  # 20% increase in sample size
+
+# Random subsample of occurrences from the null model (20% increase)
+occurrences_values_sicilia <- occurrences_values[sample(nrow(occurrences_values), stop), ]
+
+# ============================
+# Plot: Map with Unbiased and Biased Points in Sicily
+# ============================
+
+# Generate indices from `occurrences_values_sicilia`
+indices <- rownames(occurrences_values_sicilia)
+indices <- as.numeric(indices)
+filtered_coord_occ_sicilia <- coord_occ_sicilia[indices, ]
+
+# Plot settings
+par(mfrow = c(1, 1), mar = c(2, 2, 2, 0.5)) 
+
+# Plot distance-based probability raster for Sicily with unbiased and biased occurrence points
+plot(prob_raster_sicilia, col = viridis(500, alpha = 1, begin = 0, end = 1, direction = 1))
+points(filtered_coord_occ_sicilia, cex = 0.6)
+points(points_biased_sicilia, col = "red", cex = 0.6)
+
+# Add legend with increased inset for the x direction
+legend("topright", legend = c("Unbiased", "Biased"), col = c("black", "red"), pch = 19, cex = 0.8,
+       xpd = TRUE, y.intersp = 0.8, inset = c(-0.1, 0)) 
+
+
+
+
