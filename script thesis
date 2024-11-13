@@ -252,10 +252,50 @@ presence.points_sicilia <- sampleOccurrences(new.pres_sicilia,
                                              correct.by.suitability = TRUE,
                                              plot = FALSE)
 
+##plot
+
+##1 
+#Assuming random.sp_sicilia has been generated and contains the suitability raster
+suitability_raster_sicilia <- random.sp_sicilia$suitab.raster
+
+# Plot the suitability map using the viridis color palette
+plot(suitability_raster_sicilia, 
+     main = "Suitability Map - Sicilia", 
+     col = viridis(100))  # Adjust the number for the desired number of colors
+
+##2
+# Assuming new.pres_sicilia is the output from convertToPA and contains the PA raster
+pa_raster_sicilia <- new.pres_sicilia$suitab.raster
+
+# Plot the Presence/Absence Map using viridis color palette
+plot(pa_raster_sicilia, 
+     main = "Presence/Absence Map - Sicilia", 
+     col = c("green", "magenta"))  # green for absence (0), magenta for presence (1)
+
+3## 
+#Assuming presence.points_sicilia is your object containing the presence points for Sicilia
+x_coords_sicilia <- presence.points_sicilia$sample.points$x
+y_coords_sicilia <- presence.points_sicilia$sample.points$y
+
+# Assuming the suitability raster for Sicilia from random.sp_sicilia is stored in random.sp_sicilia$suitab.raster
+suitability_raster_sicilia <- random.sp_sicilia$suitab.raster
+
+# Plot the suitability map for Sicilia
+plot(suitability_raster_sicilia, 
+     main = "Occurrences - Sicilia", 
+     col = viridis(100))  # You can choose any color palette here
+
+# Add the presence points with borders (you should have x_coords and y_coords for Sicilia points)
+points(x_coords_sicilia, y_coords_sicilia, 
+       col = "black",  # Border color
+       bg = "hotpink",  # Fill color (points)
+       pch = 21,  # Use filled circles with a border (pch = 21-25)
+       cex = 1.2)  
 
 
 
-#devo plottare
+
+
 
 # ============================
 # Regione Lombardia
@@ -289,6 +329,45 @@ presence.points_lombardia <- sampleOccurrences(new.pres_lombardia,
                                                detection.probability = 1,
                                                correct.by.suitability = TRUE,
                                                plot = FALSE)
+
+##plot
+
+##1
+# Assuming random.sp_lombardia has been generated and contains the suitability raster
+suitability_raster_lombardia <- random.sp_lombardia$suitab.raster
+
+# Plot the suitability map using the viridis color palette
+plot(suitability_raster_lombardia, 
+     main = "Suitability Map - Lombardia", 
+     col = viridis(100))  # Adjust the number for the desired number of colors
+
+##2
+# Assuming new.pres_lombardia is the output from convertToPA and contains the PA raster
+pa_raster_lombardia <- new.pres_lombardia$suitab.raster
+
+# Plot the Presence/Absence Map
+plot(pa_raster_lombardia, 
+     main = "Presence/Absence Map - Lombardia", 
+     col = c("green", "magenta"))  # green for absence (0), magenta for presence (1)
+
+##3
+# Assuming presence.points_lombardia is your object containing the presence points for Lombardia
+x_coords_lombardia <- presence.points_lombardia$sample.points$x
+y_coords_lombardia <- presence.points_lombardia$sample.points$y
+
+# Plot the suitability map for Lombardia
+plot(suitability_raster_lombardia, 
+     main = "Occurrences - Lombardia", 
+     col = viridis(100))  # Choose any color palette you prefer
+
+# Add the presence points with borders (black for border, hotpink for points)
+points(x_coords_lombardia, y_coords_lombardia, 
+       col = "black",  # Border color
+       bg = "hotpink",  # Fill color (points)
+       pch = 21,  # Use filled circles with a border (pch = 21-25)
+       cex = 1.2)   # Adjust point size as needed
+
+
 
 
 ## Preliminary Steps for Niche Analysis
