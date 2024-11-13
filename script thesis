@@ -1063,6 +1063,178 @@ ggplot() +
 ##### AREA OF APPLICABILITY #### 
 
 
+
+
+# ============================
+# Sicilia: Null Model and Biased Model
+# ============================
+
+## Prepare the training data
+# Convert presence points to spatial format for Sicilia
+pa_points_sicilia <- presence.points_sicilia$sample.points[,-(3:4)] %>%
+  as.data.frame() %>% st_as_sf(coords = c("x", "y"), crs = 4326)
+
+# Extract raster data for Sicilia
+mydata_sicilia_aoa <- rast(mydata_sicilia_backup)
+
+# Subset the original points (e.g., occurrences) for Sicilia
+pa_points_sicilia <- pa_points_sicilia[rownames(occurrences_values_sicilia), ]
+
+# Extract environmental variables from the raster based on presence points
+trainDat_null_sicilia <- terra::extract(mydata_sicilia_aoa, pa_points_sicilia, na.rm = FALSE)
+
+# Extract suitability values from a random raster (suitability map for Sicilia)
+trainDat_null_sicilia$response <- terra::extract(random.sp_sicilia$suitab.raster, pa_points_sicilia, na.rm = FALSE, ID = FALSE)
+trainDat_null_sicilia <- data.frame(trainDat_null_sicilia, pa_points_sicilia) %>% na.omit()
+
+## Train model using CARET
+# Create spatial folds for cross-validation
+folds_null_sicilia <- CreateSpacetimeFolds(trainDat_null_sicilia, spacevar = "geometry", k = 4)
+
+# Set seed for reproducibility
+set.seed(15)
+model_null_sicilia <- train(trainDat_null_sicilia[, names(mydata_sicilia_aoa)],
+                            trainDat_null_sicilia$response$`VSP suitability`,
+                            method = "rf",
+                            importance = TRUE,
+                            tuneGrid = expand.grid(mtry = c(2:length(names(mydata_sicilia_aoa)))),
+                            trControl = trainControl(method ="cv", index = folds_null_sicilia$index))
+
+## Predict and calculate the error for Sicilia
+prediction_null_sicilia <- predict(mydata_sicilia_aoa, model_null_sicilia, na.rm = TRUE)
+truediff_null_sicilia <- abs(prediction_null_sicilia - random.sp_sicilia$suitab.raster)
+
+## Calculate AOA for Sicilia
+AOA_null_sicilia <- aoa(mydata_sicilia_aoa, model_null_sicilia, LPD = TRUE, verbose = FALSE)
+
+# Plot AOA derived from the prediction for Sicilia
+plot(prediction_null_sicilia, col = inferno(100), main = "Prediction for Area of Applicability - Sicilia")
+plot(AOA_null_sicilia$AOA, col = c("grey", "transparent"), add = TRUE, 
+     plg = list(x = "topleft", box.col = "black", bty = "o", title = "AOA"))
+
+
+
+
+## biased points
+biased_sp_points_sicilia <- points_biased_sicilia %>% st_as_sf(., crs = 4326)
+biased_sp_points_sicilia <- biased_sp_points_sicilia[,-(1:8)]  # Remove unnecessary columns
+
+# from raster, extract corresponding values for the biased points
+trainDat_biased <- terra::extract(mydata_sicilia_aoa, biased_sp_points_sicilia, na.rm = FALSE)
+
+# from raster, extract suitability values (same as random.sp_sicilia but for biased points)
+trainDat_biased$response <- terra::extract(random.sp_sicilia$suitab.raster, biased_sp_points_sicilia, na.rm = FALSE, ID = FALSE)
+trainDat_biased_sicilia <- data.frame(trainDat_biased, biased_sp_points_sicilia)
+
+# Omit NAs
+trainDat_biased_sicilia <- na.omit(trainDat_biased_sicilia)
+
+## train model for biased points
+# Train model with random forest (RF) using the CARET package
+folds_biased <- CreateSpacetimeFolds(trainDat_biased_sicilia, spacevar = "geometry", k = 10)  # Use 10 folds for cross-validation
+set.seed(15)
+model_biased_sicilia <- train(trainDat_biased_sicilia[, names(mydata_sicilia_aoa)],
+                              trainDat_biased_sicilia$response$`VSP suitability`,
+                              method = "rf",
+                              importance = TRUE,
+                              tuneGrid = expand.grid(mtry = c(2:length(names(mydata_sicilia_aoa)))),
+                              trControl = trainControl(method ="cv", index = folds_biased$index))
+
+## predict and calculate error for biased model
+# Use the trained model to predict for the entire area of interest (Sicilia)
+prediction_biased_sicilia <- predict(mydata_sicilia_aoa, model_biased_sicilia, na.rm = TRUE)
+
+# Calculate the difference between the predicted suitability and the reference suitability
+truediff_biased_sicilia <- abs(prediction_biased_sicilia - random.sp_sicilia$suitab.raster)
+
+## Plot the predictions for both models
+par(mfrow = c(1, 2))  # Two-panel layout
+# Plot predictions for the null model
+plot(prediction_null_sicilia, main = "RF Null Model", col = inferno(500, alpha = 1, begin = 0, end = 1, direction = 1), legend = FALSE)
+# Plot predictions for the biased model
+plot(prediction_biased_sicilia, main = "RF Biased Data", col = inferno(500, alpha = 1, begin = 0, end = 1, direction = 1))
+
+
+
+## the AOA calculation takes the model as input to extract the importance of the predictors 
+# used as weights in multidimensional distance calculation.
+AOA_biased_sicilia <- aoa(mydata_sicilia_aoa, model_biased_sicilia, LPD = TRUE, verbose = FALSE)
+
+# AOA: derived from the DI (distance to the ideal) by using a threshold.
+# Plot the prediction for AOA (Biased)
+plot(prediction_biased_sicilia, col = inferno(100), main = "Prediction for AOA (Biased) - Sicilia")
+plot(AOA_biased_sicilia$AOA, col = c("grey", "transparent"), add = TRUE, 
+     plg = list(x = "topleft", box.col = "black", bty = "o", title = "AOA"))
+
+
+
+# Set up a two-panel layout for the plots
+par(mfrow = c(1, 2))
+
+# Plot the prediction and AOA for the Null model
+plot(prediction_null_sicilia, col = viridis(100), main = "Prediction for AOA (Null) - Sicilia")
+plot(AOA_null_sicilia$AOA, col = c("grey", "transparent"), add = TRUE, 
+     plg = list(x = "topright", box.col = "black", bty = "o", title = "AOA"))
+
+# Plot the prediction and AOA for the Biased model
+plot(prediction_biased_sicilia, col = viridis(100), main = "Prediction for AOA (Biased) - Sicilia")
+plot(AOA_biased_sicilia$AOA, col = c("grey", "transparent"), add = TRUE, 
+     plg = list(x = "topright", box.col = "black", bty = "o", title = "AOA"))
+
+
+
+
+## Calculate the difference between the two models and show on a map
+
+# Masking the null model predictions based on the AOA of the null model
+masked_raster_null_sicilia <- mask(prediction_null_sicilia, AOA_null_sicilia$AOA, maskvalues = 0, updatevalue = NA)
+
+# Masking the biased model predictions based on the AOA of the biased model
+masked_raster_biased_sicilia <- mask(prediction_biased_sicilia, AOA_biased_sicilia$AOA, maskvalues = 0, updatevalue = NA)
+
+# Pixels that are in the null model only (where the biased model has no prediction)
+diff_null_only_sicilia <- ifel(!is.na(masked_raster_null_sicilia) & is.na(masked_raster_biased_sicilia), 1, NA)
+
+# Pixels that are in the biased model only (where the null model has no prediction)
+diff_biased_only_sicilia <- ifel(is.na(masked_raster_null_sicilia) & !is.na(masked_raster_biased_sicilia), -1, NA)
+
+# Merge the differences to show where each model has predictions and where they differ
+diff_raster_sicilia <- merge(diff_null_only_sicilia, diff_biased_only_sicilia)
+
+# Color palette for the difference map (deep pink for bias only, dark green for null only)
+col_palette_sicilia <- c("deeppink", "darkgreen")
+
+# Plot the results in a 1x3 layout
+par(mfrow = c(1, 3), mar = c(5, 4, 4, 4) + 0.1)
+
+# Plot the masked null model
+plot(masked_raster_null_sicilia, main = "Null Model", col = viridis(100), legend = FALSE)
+
+# Plot the masked biased model
+plot(masked_raster_biased_sicilia, main = "Biased Model", col = viridis(100), legend = FALSE)
+
+# Plot the difference raster
+plot(diff_raster_sicilia, col = col_palette_sicilia, main = "Difference (Null - Biased)", legend = FALSE)
+
+# Add a legend for the difference plot
+par(mar = c(5, 4, 4, 4) + 0.1, xpd = TRUE)
+legend("topleft", legend = c("Bias - Null", "Null - Bias"), fill = col_palette_sicilia, cex = 0.8, bty = "n")
+
+# Reset the plotting parameters to a single plot layout
+par(mfrow = c(1, 1))
+
+# Optional: Save the plot to a file (e.g., PDF or PNG)
+# dev.off()
+
+
+
+
+
+
+
+
+
+
 # ============================
 # Lombardia: Null Model and Biased Model
 # ============================
