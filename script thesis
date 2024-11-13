@@ -425,10 +425,10 @@ r_sicilia <- terra::rasterize(roads_vect_sicilia, raster_roads_sicilia)
 d_sicilia <- distance(r_sicilia, unit = "km")
 
 # Crop the distance raster using the Sicily polygon
-d_rast_sicilia <- terra::crop(d_sicilia, Sicilia.shp)
+d_rast_sicilia <- terra::crop(d_sicilia, aoi_sicilia)
 
 # Mask the raster to retain only the data within the Sicily polygon
-d_rast_sicilia <- terra::mask(d_rast_sicilia, Sicilia.shp)
+d_rast_sicilia <- terra::mask(d_rast_sicilia, aoi_sicilia)
 
 # Calculate the sampling probability using the "lazy sampler" function
 c <- 1
