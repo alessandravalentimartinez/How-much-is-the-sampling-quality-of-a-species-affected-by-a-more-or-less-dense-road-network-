@@ -706,3 +706,356 @@ points(points_biased_lombardia, col = "red", cex = 0.6)
 # Add legend
 legend("topright", legend = c("Unbiased", "Biased"), col = c("black", "red"), pch = 19, cex = 0.8,
        xpd = TRUE, y.intersp = 0.8, inset = c(-0.1, 0)) 
+
+
+
+
+
+
+
+
+
+
+## Unbiased vs biased hypervolume
+
+# ============================
+# Regione Sicilia
+# ============================
+
+
+# Define the number of simulations (for example, 10 simulations)
+num_sim <- 10
+
+# List with the occurrences we want to test (using the correct stop value for Sicilia)
+hyp_steps <- c(seq(from = 40, to = stop, by = 30), stop)
+
+# Empty list for storing simulation results
+all_sim_sicilia <- list()
+
+# Simulation loop for unbiased occurrences
+for (sim in 1:num_sim) {
+  
+  list_output_sicilia <- list()
+  
+  # Loop through the hypervolume steps for unbiased occurrences
+  for (i in seq_along(hyp_steps)) {
+    # Call the Sicilia-specific accumulation curve function
+    d_hyp <- acc_curve(occurrences_values_sicilia, hyp_steps[i])
+    list_output_sicilia[[i]] <- d_hyp[[1]]
+  }
+  
+  # Store the results of each simulation
+  all_sim_sicilia[[sim]] <- list_output_sicilia
+}
+
+# Combine all simulations into one dataframe
+combined_df_sicilia <- do.call(rbind, lapply(seq_along(all_sim_sicilia), function(sim) {
+  do.call(rbind, lapply(all_sim_sicilia[[sim]], function(df) {
+    df$sim <- sim
+    df
+  }))
+}))
+
+# Calculate mean predictions using LOESS
+x_seq_sicilia <- seq(min(combined_df_sicilia$n_occ), max(combined_df_sicilia$n_occ), length.out = 100)
+
+# LOESS mean predictions for the simulations
+loess_predictions_sicilia <- lapply(unique(combined_df_sicilia$n_occ), function(n) {
+  preds <- sapply(all_sim_sicilia, function(lista) {
+    loess_fit <- loess(iperv ~ n_occ, data = do.call(rbind, lista))
+    predict(loess_fit, newdata = data.frame(n_occ = n))
+  })
+  
+  data.frame(n_occ = n, iperv_mean = mean(preds, na.rm = TRUE))
+})
+
+# Combine LOESS predictions into one dataframe
+pred_mean_sicilia <- do.call(rbind, loess_predictions_sicilia)
+
+# Plot: unbiased hypervolume for Sicilia
+ggplot() +
+  geom_smooth(data = combined_df_sicilia, aes(x = n_occ, y = iperv, group = sim), 
+              method = "loess", se = FALSE, color = "grey", size = 0.5, alpha = 0.5) +
+  geom_line(data = pred_mean_sicilia, aes(x = n_occ, y = iperv_mean), 
+            color = "sienna1", size = 1.2) +
+  labs(title = "Mean Hypervolume (Unbiased Dataset) - Sicilia",
+       x = "Occurrences",
+       y = "Hypervolume") +
+  theme_minimal()
+
+
+# Hypervolume of biased occurrences (road-driven: biased sampling)
+biased_df_sicilia <- points_biased_sicilia %>%
+  as.data.frame() %>%
+  .[,-c(5:8)]  # Assuming this removes some irrelevant columns
+
+# Define the stop value for the biased dataset
+stop_biased_sicilia <- nrow(biased_df_sicilia)
+hyp_steps_b_si <- c(seq(from = 20, to = stop_biased_sicilia, by = 20), stop_biased_sicilia)
+
+# Empty list for storing simulation results
+all_sim_biased_si <- list()
+
+# Simulation loop for biased dataset
+for (sim in 1:num_sim) {
+  
+  list_output_biased_sicilia <- list()
+  
+  # Loop through the hypervolume steps for biased occurrences
+  for (i in seq_along(hyp_steps_b_si)) {
+    # Call the function for the accumulation curve for biased occurrences
+    d_hyp_b_si <- acc_curve(biased_df_sicilia, hyp_steps_b_si[i])
+    list_output_biased_sicilia[[i]] <- d_hyp_b_si[[1]]
+  }
+  
+  # Store the results of each simulation
+  all_sim_biased_si[[sim]] <- list_output_biased_sicilia
+  
+}
+
+# Combine all simulations into one dataframe for biased data
+combined_df_biased_sicilia <- do.call(rbind, lapply(seq_along(all_sim_biased_si), function(sim) {
+  do.call(rbind, lapply(all_sim_biased_si[[sim]], function(df) {
+    df$sim <- sim  # Add simulation identifier
+    df
+  }))
+}))
+
+# Calculate mean predictions using LOESS for the biased data
+loess_predictions_biased_sicilia <- lapply(unique(combined_df_biased_sicilia$n_occ), function(n) {
+  
+  preds_sicilia <- sapply(all_sim_biased_si, function(lista) {
+    loess_fit_sicilia <- loess(iperv ~ n_occ, data = do.call(rbind, lista))
+    predict(loess_fit_sicilia, newdata = data.frame(n_occ = n))
+  })
+  
+  data.frame(n_occ = n, iperv_mean = mean(preds_sicilia, na.rm = TRUE))
+  
+})
+
+# Combine LOESS predictions into one dataframe for biased data
+pred_mean_biased_sicilia <- do.call(rbind, loess_predictions_biased_sicilia)
+
+# Plot: biased hypervolume for Sicilia
+ggplot() +
+  geom_smooth(data = combined_df_biased_sicilia, aes(x = n_occ, y = iperv, group = sim), 
+              method = "loess", se = FALSE, color = "grey", size = 0.5, alpha = 0.5) +
+  geom_line(data = pred_mean_biased_sicilia, aes(x = n_occ, y = iperv_mean), 
+            color = "darkgreen", size = 1.2) +
+  labs(title = "Mean Hypervolume (Biased Dataset) - Sicilia",
+       x = "Occurrences",
+       y = "Hypervolume") +
+  theme_minimal()
+
+
+# Plot: Unbiased & Biased Hypervolume Comparison for Sicilia
+
+# Combine the unbiased and biased data
+combined_df_sicilia$total <- "unbiased"
+combined_df_biased_sicilia$total <- "biased"
+combined_data_sicilia <- rbind(combined_df_sicilia, combined_df_biased_sicilia)
+
+# Filter out rows with NA values for n_occ or iperv_mean
+pred_mean_sicilia <- pred_mean_sicilia %>% filter(!is.na(n_occ) & !is.na(iperv_mean))
+pred_mean_biased_sicilia <- pred_mean_biased_sicilia %>% filter(!is.na(n_occ) & !is.na(iperv_mean))
+
+# Plot: Unbiased vs Biased Hypervolume for Sicilia
+ggplot() +
+  # Unbiased hypervolume
+  geom_smooth(data = combined_df_sicilia, aes(x = n_occ, y = iperv, group = sim), 
+              method = "loess", se = FALSE, color = "grey", size = 0.5, alpha = 0.5) +
+  
+  # Biased hypervolume
+  geom_smooth(data = combined_df_biased_sicilia, aes(x = n_occ, y = iperv, group = sim), 
+              method = "loess", se = FALSE, color = "grey", size = 0.5, alpha = 0.5) +
+  
+  # Mean predictions for unbiased data
+  geom_line(data = pred_mean_sicilia, aes(x = n_occ, y = iperv_mean), 
+            color = "sienna1", size = 1.2) +
+  
+  # Mean predictions for biased data
+  geom_line(data = pred_mean_biased_sicilia, aes(x = n_occ, y = iperv_mean), 
+            color = "darkgreen", size = 1.2) +
+  
+  # Add title and axis labels
+  labs(title = "Hypervolume (Unbiased vs Biased) - Sicilia",
+       x = "Occurrences",
+       y = "Hypervolume") +
+  theme_minimal()
+
+
+
+
+
+
+
+
+##Unbiased vs biased hypervolume##
+
+# ============================
+# Regione Lombardia
+# ============================
+
+
+# Define the number of simulations (for example, 10 simulations)
+num_sim <- 10
+
+# List with the occurrences we want to test (using the correct stop value for Lombardy)
+hyp_steps <- c(seq(from = 40, to = stop_lombardia, by = 30), stop_lombardia)
+
+# Empty list for storing simulation results
+all_sim_lombardia <- list()
+
+# Simulation loop
+for (sim in 1:num_sim) {
+  
+  list_output_lombardia <- list()
+  
+  # Loop through the hypervolume steps
+  for (i in seq_along(hyp_steps)) {
+    # Call the Lombardy-specific accumulation curve function
+    d_hyp <- acc_curve_lombardia(occurrences_values_lombardia, hyp_steps[i])
+    list_output_lombardia[[i]] <- d_hyp[[1]]
+  }
+  
+  # Store the results of each simulation
+  all_sim_lombardia[[sim]] <- list_output_lombardia
+}
+
+# Combine all simulations into one dataframe
+combined_df_lombardia <- do.call(rbind, lapply(seq_along(all_sim_lombardia), function(sim) {
+  do.call(rbind, lapply(all_sim_lombardia[[sim]], function(df) {
+    df$sim <- sim
+    df
+  }))
+}))
+
+# Calculate mean predictions using LOESS
+x_seq_lombardia <- seq(min(combined_df_lombardia$n_occ), max(combined_df_lombardia$n_occ), length.out = 100)
+
+# LOESS mean predictions for the simulations
+loess_predictions_lombardia <- lapply(unique(combined_df_lombardia$n_occ), function(n) {
+  preds <- sapply(all_sim_lombardia, function(lista) {
+    loess_fit <- loess(iperv ~ n_occ, data = do.call(rbind, lista))
+    predict(loess_fit, newdata = data.frame(n_occ = n))
+  })
+  
+  data.frame(n_occ = n, iperv_mean = mean(preds, na.rm = TRUE))
+})
+
+# Combine LOESS predictions into one dataframe
+pred_mean_lombardia <- do.call(rbind, loess_predictions_lombardia)
+
+# Plot: unbiased hypervolume for Lombardy
+ggplot() +
+  geom_smooth(data = combined_df_lombardia, aes(x = n_occ, y = iperv, group = sim), 
+              method = "loess", se = FALSE, color = "grey", size = 0.5, alpha = 0.5) +
+  geom_line(data = pred_mean_lombardia, aes(x = n_occ, y = iperv_mean), 
+            color = "sienna1", size = 1.2) +
+  labs(title = "Mean Hypervolume (Unbiased Dataset) - Lombardia",
+       x = "Occurrences",
+       y = "Hypervolume") +
+  theme_minimal()
+
+
+
+# Hypervolume of biased occurrences (road-driven: biased sampling)
+biased_df_lombardia <- points_biased_lombardia %>%
+  as.data.frame() %>%
+  .[,-c(5:8)]  # Assuming this removes some irrelevant columns
+
+# Define the stop value for the biased dataset
+stop_biased_lombardia <- nrow(biased_df_lombardia)
+hyp_steps_b_lo <- c(seq(from = 20, to = stop_biased_lombardia, by = 20), stop_biased_lombardia)
+
+# Empty list for storing simulation results
+all_sim_biased_lo <- list()
+
+# Simulation loop for biased dataset
+for (sim in 1:num_sim) {
+  
+  list_output_biased_lomb <- list()
+  
+  # Loop through the hypervolume steps for biased occurrences
+  for (i in seq_along(hyp_steps_b_lo)) {
+    # Call the function for the accumulation curve for biased occurrences
+    d_hyp_b_lo <- acc_curve(biased_df_lombardia, hyp_steps_b_lo[i])
+    list_output_biased_lomb[[i]] <- d_hyp_b_lo[[1]]
+  }
+  
+  # Store the results of each simulation
+  all_sim_biased_lo[[sim]] <- list_output_biased_lomb
+  
+}
+
+# Combine all simulations into one dataframe for biased data
+combined_df_biased_lombardia <- do.call(rbind, lapply(seq_along(all_sim_biased_lo), function(sim) {
+  do.call(rbind, lapply(all_sim_biased_lo[[sim]], function(df) {
+    df$sim <- sim  # Add simulation identifier
+    df
+  }))
+}))
+
+# Calculate mean predictions using LOESS for the biased data
+loess_predictions_biased_lombardia <- lapply(unique(combined_df_biased_lombardia$n_occ), function(n) {
+  
+  preds_lombardia <- sapply(all_sim_biased_lo, function(lista) {
+    loess_fit_lombardia <- loess(iperv ~ n_occ, data = do.call(rbind, lista))
+    predict(loess_fit_lombardia, newdata = data.frame(n_occ = n))
+  })
+  
+  data.frame(n_occ = n, iperv_mean = mean(preds_lombardia, na.rm = TRUE))
+  
+})
+
+# Combine LOESS predictions into one dataframe for biased data
+pred_mean_biased_lombardia <- do.call(rbind, loess_predictions_biased_lombardia)
+
+# Plot: biased hypervolume
+ggplot() +
+  geom_smooth(data = combined_df_biased_lombardia, aes(x = n_occ, y = iperv, group = sim), 
+              method = "loess", se = FALSE, color = "grey", size = 0.5, alpha = 0.5) +
+  geom_line(data = pred_mean_biased_lombardia, aes(x = n_occ, y = iperv_mean), 
+            color = "darkgreen", size = 1.2) +
+  labs(title = "Mean Hypervolume (Biased Dataset)",
+       x = "Occurrences",
+       y = "Hypervolume") +
+  theme_minimal()
+
+
+
+# Plot: Unbiased & Biased Hypervolume Comparison
+
+# Combine the unbiased and biased data
+combined_df_lombardia$total <- "unbiased"
+combined_df_biased_lombardia$total <- "biased"
+combined_data_lombardia <- rbind(combined_df_lombardia, combined_df_biased_lombardia)
+
+# Filter out rows with NA values for n_occ or iperv_mean
+pred_mean_lombardia <- pred_mean_lombardia %>% filter(!is.na(n_occ) & !is.na(iperv_mean))
+pred_mean_biased_lombardia <- pred_mean_biased_lombardia %>% filter(!is.na(n_occ) & !is.na(iperv_mean))
+
+# Plot: Unbiased vs Biased Hypervolume for Lombardia
+ggplot() +
+  # Unbiased hypervolume
+  geom_smooth(data = combined_df_lombardia, aes(x = n_occ, y = iperv, group = sim), 
+              method = "loess", se = FALSE, color = "grey", size = 0.5, alpha = 0.5) +
+  
+  # Biased hypervolume
+  geom_smooth(data = combined_df_biased_lombardia, aes(x = n_occ, y = iperv, group = sim), 
+              method = "loess", se = FALSE, color = "grey", size = 0.5, alpha = 0.5) +
+  
+  # Mean predictions for unbiased data
+  geom_line(data = pred_mean_lombardia, aes(x = n_occ, y = iperv_mean), 
+            color = "sienna1", size = 1.2) +
+  
+  # Mean predictions for biased data
+  geom_line(data = pred_mean_biased_lombardia, aes(x = n_occ, y = iperv_mean), 
+            color = "darkgreen", size = 1.2) +
+  
+  # Add title and axis labels
+  labs(title = "Hypervolume (Unbiased vs Biased) - Lombardia",
+       x = "Occurrences",
+       y = "Hypervolume") +
+  theme_minimal()
+
