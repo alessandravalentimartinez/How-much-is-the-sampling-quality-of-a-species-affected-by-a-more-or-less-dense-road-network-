@@ -20,6 +20,7 @@ library(gdata)
 library(ggmap)
 library(osmdata)
 library(osmextract)
+library(rlang)
 
 # set working directory
 setwd("C:/tesi")
