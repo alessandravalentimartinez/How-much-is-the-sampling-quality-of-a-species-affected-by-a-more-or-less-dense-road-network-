@@ -48,6 +48,23 @@ mydata <- raster::stack(r_list)
 aoi_sp <- sf::as_Spatial(aoi_sicilia)
 mydata <- mydata %>% crop(., aoi_sp) %>% mask(., aoi_sp)
 
+# Rinomina i layer nel raster stack
+names(mydata_sicilia) <- c("Temperature Minimum", "Temperature Maximum", "Precipitation")
+
+# Controlla i nuovi nomi dei layer
+names(mydata_sicilia)
+
+# Plot per tmin (Temperature Minimum)
+plot(mydata_sicilia$`Temperature.Minimum`, main = "Temperature Minimum", col = viridis::viridis(100))
+
+# Plot per tmax (Temperature Maximum)
+plot(mydata_sicilia$`Temperature.Maximum`, main = "Temperature Maximum", col = viridis::viridis(100))
+
+# Plot per prec (Precipitation)
+plot(mydata_sicilia$Precipitation, main = "Precipitation", col = viridis::viridis(100))
+
+
+
 # distances
 roads_vect <- terra::vect(osm_sicilia_roads$geometry)
 
