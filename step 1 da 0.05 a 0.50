@@ -1,0 +1,5697 @@
+library(sf)
+library(raster)
+library(virtualspecies)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(terra)
+library(geodata)
+library(osmdata)
+library(osmextract)
+
+
+# set wd
+setwd("C:/tesi")
+
+# upload shapefile
+aoi_sicilia <- st_read("sicilia.shp") %>% .$geometry 
+
+# plot region
+plot(aoi_sicilia)
+
+# bounding box 
+abruzzo_bb <- st_bbox(aoi_sicilia)
+
+# from OSM select type of roads: primary, secondary, tertiary (paths)
+ht_secondary <- "secondary"
+
+
+# download roads from OSM 
+osm_sicilia <- oe_get("Sicilia", stringsAsFactors = FALSE, quiet = TRUE)
+osm_sicilia_roads <- osm_sicilia[osm_sicilia$highway %in% ht_secondary, ]
+
+# bioclimatic variables from worldclim
+tmin <- worldclim_country("Ita", "tmin", path=tempdir(), res = 0.5, version = "2.1")
+tmax <- worldclim_country("Ita", "tmax", path=tempdir(), res = 0.5, version = "2.1")
+prec <- worldclim_country("Ita", "prec", path=tempdir(), res = 0.5, version = "2.1")
+
+# first month only
+tmin <- tmin$ITA_wc2.1_30s_tmin_1
+tmax <- tmax$ITA_wc2.1_30s_tmax_1
+prec <- prec$ITA_wc2.1_30s_prec_1
+
+# stack
+r_list <- c(tmin, tmax, prec)
+mydata <- raster::stack(r_list)
+
+# crop and mask by region borders
+aoi_sp <- sf::as_Spatial(aoi_sicilia)
+mydata <- mydata %>% crop(., aoi_sp) %>% mask(., aoi_sp)
+
+# distances
+roads_vect <- terra::vect(osm_sicilia_roads$geometry)
+
+# After creating the raster stack and cropping/masking by region borders
+mydata_backup <- mydata  # Backup of the original raster stack
+
+# Converting to SpatRaster if needed
+raster_roads <- as(mydata_backup[[1]], "SpatRaster")
+
+
+raster_roads <- as(mydata_backup[[1]], "SpatRaster")
+
+r <- terra::rasterize(roads_vect, raster_roads)
+d <- distance(r, unit = "km") 
+
+# raster with distances
+d_raster <- d %>% raster()
+
+# probability to be sampled
+distances <- d_raster %>% as.data.frame()
+c <- 1
+sampling_prob <- 1 - (((log(c * distances)) / (log(max(c * distances))))) %>% as.data.frame()
+
+sampling_prob[sampling_prob == Inf] <- 1
+sampling_prob[sampling_prob > 1] <- 1
+
+# probability as a raster
+prob_raster <- classify(d, cbind(values(d), sampling_prob))
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.05
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 600
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+#### 0.05/700
+
+# species prevalence
+sp_prevalence <- 0.05
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 700
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+### 0.05/800
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.05
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 800
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+### 0.05/900
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.05
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 900
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.05/1000
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.05
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 1000
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+### 0.10/600
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.10
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 600
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.10/700
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.10
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 700
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+
+### 0.10/800
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.10
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 800
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+
+### 0.10/900
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.10
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 900
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+### 0.10/1000
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.10
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 1000
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+### 0.15/600
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.15
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 600
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.15/700
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.15
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 700
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.15/800
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.15
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 800
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+### 0.15/900
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.15
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 900
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+### 0.15/1000
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.15
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 1000
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+### 0.20/600
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.20
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 600
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+### 0.20/700
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.20
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 700
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+### 0.20/600
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.20
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 600
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+### 0.20/800
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.20
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 800
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+### 0.20/900
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.20
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 900
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+### 0.20/1000
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.20
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 1000
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.25/600
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.25
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 600
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.25/700
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.25
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 700
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.25/800
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.25
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 800
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+### 0.25/900
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.25
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 900
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.25/1000
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.25
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 1000
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.30/600
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.30
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 600
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.30/700
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.30
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 700
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.30/800
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.30
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 800
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+### 0.30/900
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.30
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 900
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.30/1000
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.30
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 1000
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.35/600
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.35
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 600
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.35/700
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.35
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 700
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.35/800
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.35
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 800
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.35/900
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.35
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 900
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.35/1000
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.35
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 1000
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+### 0.40/600
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.40
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 600
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+### 0.40/700
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.40
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 700
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.40/800
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.40
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 800
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.40/900
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.40
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 900
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.40/1000
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.40
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 1000
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+### 0.45/600
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.45
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 600
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.45/700
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.45
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 700
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.45/800
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.45
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 800
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.45/900
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.45
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 900
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.45/1000
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.45
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 1000
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.50/600
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.50
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 600
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+### 0.50/700
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.50
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 700
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+
+### 0.50/800
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.50
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 800
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.50/900
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.50
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 900
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
+
+### 0.50/1000
+
+
+# parameters to be saved
+# species prevalence
+sp_prevalence <- 0.50
+
+# sample prevalence
+sample_prev <- 0.9
+
+# n. occurrences
+n_occ <- 1000
+
+# number of species
+n_species <- 5
+
+# cicle for virtual species generation 
+for (species_num in 1:n_species) {
+  
+  # virtual species: suitability
+  random.sp <- generateRandomSp(raster.stack = mydata,
+                                convert.to.PA = FALSE,
+                                species.type = "multiplicative",
+                                approach = "response",
+                                relations = "gaussian",
+                                realistic.sp = TRUE,
+                                plot = FALSE)
+  
+  # presence/absence
+  new.pres <- convertToPA(random.sp,
+                          beta = "random",
+                          alpha = -0.05, plot = FALSE,
+                          species.prevalence = sp_prevalence)
+  
+  # random occurrences
+  presence.points <- sampleOccurrences(new.pres,
+                                       n = n_occ,
+                                       type = "presence only",
+                                       sample.prevalence = sample_prev,
+                                       error.probability = 0,
+                                       detection.probability = 1,
+                                       correct.by.suitability = TRUE,
+                                       plot = FALSE)
+  
+  # occurrences as points
+  initial_occ <- presence.points$sample.points %>%
+    as.data.frame() %>%
+    .[.$Real == 1 & .$Observed == 1, ] %>%
+    st_as_sf(., coords = c("x","y"))
+  
+  # add bioclimatic values
+  drops <- c("Real", "Observed")
+  initial_occ_bio_var <- terra::extract(mydata, initial_occ) %>%
+    cbind(., initial_occ) %>%
+    st_set_crs(4326) %>%
+    .[, !(names(.) %in% drops)]
+  
+  # add distances
+  initial_occ_bio_var <- d_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+  
+  # add suitability
+  initial_occ_bio_var <- random.sp$suitab.raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+  
+  
+  # add probability to be sampled for each point
+  initial_occ_bio_var <- prob_raster %>%
+    terra::extract(., initial_occ_bio_var) %>%
+    cbind(initial_occ_bio_var, .)
+  
+  # rename
+  names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+  
+  # unbiased and biased columns
+  # every point is initially unbiased (random sampling)
+  # if the probability to be sampled is == 1, the point could fall into the 'biased' category
+  initial_occ_bio_var <- initial_occ_bio_var %>%
+    mutate(
+      UNBIASED = TRUE, 
+      BIASED = probability == 1 
+    )
+  
+  
+  # dataframe
+  df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+  
+  # add variables and drop the 'geometry' column 
+  df <- cbind(df, initial_occ_bio_var
+              [, !(names(initial_occ_bio_var) %in% c("geometry"))]
+  ) 
+  
+  df$geometry <- NULL
+  # save as csv
+  # the name will include: the number of the species, species prevalence, sample prevalence and number of initial occurrences
+  file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prevalence, 
+                      "_sample_prev_", sample_prev, "_n_occ_", n_occ, ".csv")
+  write.csv(df, file_name, row.names = FALSE)
+  
+}
+
