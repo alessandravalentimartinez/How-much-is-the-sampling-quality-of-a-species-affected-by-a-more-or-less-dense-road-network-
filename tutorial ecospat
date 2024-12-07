@@ -174,6 +174,91 @@ ecospat.mantel.correlogram(dfvar=ocAUS.df[c(1:21)],colxy=20:21, n=100, colvar=1:
 
 
 
+######## CORE MODELING
+
+
+
+pca.clim <- dudi.pca(globalEnvM, center = TRUE,
+                     scale = TRUE, scannf = FALSE, nf = 2)
+
+global.scores <- pca.clim$li
+
+nativeLS.scores <-
+  suprow(pca.clim,
+         data.frame(ocEUR)[, colnames(globalEnvM)])$li   
+invasiveLS.scores <-
+  suprow(pca.clim,
+         data.frame(ocAUS)[, colnames(globalEnvM)])$li
+
+nativeEnv.scores <- suprow(pca.clim, eurEnvM)$li
+invasiveEnv.scores <- suprow(pca.clim, ausEnvM)$li
+
+
+
+######### NICHE OVERLAP
+
+
+data.frame(ocEUR)[, colnames(globalEnvM)]
+# calculate the Occurrence Density Grid for both native and invasive species
+nativeGrid <- ecospat.grid.clim.dyn(global.scores,
+                                    nativeEnv.scores,
+                                    nativeLS.scores)
+
+invasiveGrid <- ecospat.grid.clim.dyn(global.scores,
+                                      invasiveEnv.scores, 
+                                      invasiveLS.scores)
+
+ecospat.plot.niche.dyn(nativeGrid, invasiveGrid, quant = 0.1, interest = 2, title = "Niche Overlap", name.axis1 = "PC1", name.axis2 = "PC2")
+
+
+
+
+
+# plot variable contributions
+
+ecospat.plot.contrib(contrib=pca.clim$co, eigen=pca.clim$eig)
+
+
+
+#################
+
+
+ocAUSearly <- subset(ocAUS, year <= 1950)
+ocAUSlate <- subset(ocAUS, year > 1950)
+
+geoGrid <- expand.grid(longitude =
+                         seq(100, 160, length.out = 250),
+                       latitude =
+                         seq(-45, -10, length.out = 250))
+
+mask <- subset(countriesCoarse, NAME == "Australia")
+
+
+# Convert SpatialPolygonsDataFrame to SpatVector
+mask_spat <- vect(mask)
+
+# Apply the mask with the correct SpatRaster and SpatVector objects
+earlyGeoGrid <- ecospat.grid.clim.dyn(geoGrid, geoGrid,
+                                      coordinates(ocAUSearly),
+                                      geomask = mask_spat)
+
+
+lateGeoGrid <- ecospat.grid.clim.dyn(geoGrid, geoGrid,
+                                     coordinates(ocAUSlate),
+                                     geomask = mask_spat)
+
+ecospat.plot.niche.dyn(earlyGeoGrid, lateGeoGrid, quant = 0)
+plot(countriesCoarse, add = TRUE)
+
+
+
+
+
+
+
+
+
+
 
 
 
