@@ -302,7 +302,30 @@ ecospat.shift.centroids(data.frame(ocEUR)[,4],
 
 
 
-################################################
+################################################ Ensamble model 
+
+
+library(markdown)
+library(rmarkdown)
+
+
+
+ocEUR$occ <- 1
+ocEUR_coords <- data.frame(coordinates(ocEUR))
+
+eurEnvR <- stack(eurEnvR)
+
+nat.biomod <- BIOMOD_FormatingData(resp.var = as.numeric(data.frame(ocEUR)[,23]),
+                                   PA.strategy = "random",
+                                   PA.nb.rep = 1,
+                                   PA.nb.absences = 1000,
+                                   expl.var = eurEnvR,
+                                   resp.xy = ocEUR_coords,
+                                   resp.name = "Oryctolagus cuniculus",
+                                   filter.raster = TRUE)
+
+plot(nat.biomod)
+
 
 
 
