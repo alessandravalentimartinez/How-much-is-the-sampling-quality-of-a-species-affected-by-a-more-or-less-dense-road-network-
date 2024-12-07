@@ -68,3 +68,23 @@ plot(countriesCoarse, border = "gray80")
 points(ocEUR, pch = 16, col = 2, cex = 0.3)
 points(ocAUS, pch = 16, col = 4, cex = 0.3, add=T)
 
+
+########### PRE MODELING 
+
+# crop the environmental data to the native and invasive geographical ranges
+eurEnvR <- crop(wclim, eurExt)
+ausEnvR <- crop(wclim, ausExt)
+
+
+# Assuming is a SpatRaster object
+ausEnvM <- values(ausEnvR)
+eurEnvM <- values(eurEnvR)
+
+# remove missing values
+eurEnvM <- eurEnvM[complete.cases(eurEnvM), ]
+ausEnvM <- ausEnvM[complete.cases(ausEnvM), ]
+
+# produce global environmental background data
+globalEnvM <- rbind(eurEnvM, ausEnvM)
+
+
