@@ -88,3 +88,68 @@ ausEnvM <- ausEnvM[complete.cases(ausEnvM), ]
 globalEnvM <- rbind(eurEnvM, ausEnvM)
 
 
+
+
+
+####################### pre stat
+
+# rename
+
+worldclim2.1_variables <- c(
+  "ann.mean.temp", 
+  "diurnal.temp.range.mean",
+  "isothermality",
+  "temp.seasonality",
+  "max.temp.warmest_month",
+  "min.temp.coldest_month",
+  "ann.temp.range",
+  "mean.temp.wettest_quarter",
+  "mean.temp.driest_quarter",
+  "mean.temp.warmest_quarter",
+  "mean.temp.coldest_quarter",
+  "ann.precip",
+  "precip.wettest_month",
+  "precip.driest_month",
+  "precip.seasonality",
+  "precip.wettest_quarter",
+  "precip.driest_quarter",
+  "precip.warmest_quarter",
+  "precip.coldest_quarter",
+  "x",
+  "y"
+)
+
+ocEUR.df <- as.data.frame(ocEUR)
+ocAUS.df <- as.data.frame(ocAUS)
+ocEUR.df <- ocEUR.df[, 4:24]
+ocAUS.df <- ocAUS.df[, 4:24]
+colnames(ocEUR.df) <- worldclim2.1_variables
+colnames(ocAUS.df) <- worldclim2.1_variables
+
+
+# recalculate 
+
+for (col in 1:ncol(ocEUR.df)) {
+  # Check if column name contains "temp"
+  if (grepl("temp", colnames(ocEUR.df)[col])) {
+    # Divide column values by 10
+    ocEUR.df[, col] <- ocEUR.df[, col] / 10
+  }
+}
+
+for (col in 1:ncol(ocAUS.df)) {
+  # Check if column name contains "temp"
+  if (grepl("temp", colnames(ocAUS.df)[col])) {
+    # Divide column values by 10
+    ocAUS.df[, col] <- ocAUS.df[, col] / 10
+  }
+}
+
+
+
+
+
+
+
+
+
