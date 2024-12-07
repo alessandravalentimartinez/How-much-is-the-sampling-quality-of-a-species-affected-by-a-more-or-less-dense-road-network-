@@ -161,6 +161,11 @@ bioStats <- rbind(occEURstats, occAUSstats)
 head(bioStats[, c(1, 7, 12)], 10)
 
 
+##############################
+# native range
+
+ecospat.mantel.correlogram(dfvar=ocEUR.df[c(1:21)],colxy=20:21, n=100, colvar=1:19, 
+                           max=10, nclass=10, nperm=100)
 
 
 
