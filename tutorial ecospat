@@ -1,3 +1,4 @@
+
 library(ecospat)
 library(raster)
 library(rgbif)
@@ -8,8 +9,9 @@ library(ade4)
 library(ape)
 library(biomod2)
 library(rworldmap)
+
 library(sp)
-library(geodata)
+
 
 ``
 
@@ -43,13 +45,26 @@ wclim <- worldclim_global(var = "bio", res = 10, version = "2.1", path = tempdir
 par(mar = c(0, 0, 3, 1))  # Set plot margins
 plot(wclim$wc2.1_10m_bio_1, main = "Mean Annual Temperature [°C] (BIO1)")
 
-# Convert SpatRaster to RasterLayer (if you're using the raster package)
-wclim_raster <- raster(wclim)
+################################################
 
+# Assuming `ocOccs` is a SpatialPointsDataFrame, convert it to SpatVector
+ocOccs_spat <- vect(ocOccs)
 
-# Assuming 'ocOccs' is a SpatialPointsDataFrame
-ocOccs <- cbind(ocOccs, extract(wclim_raster, ocOccs))
+# Now use terra::extract with the SpatRaster and SpatVector
+ocOccs <- cbind(ocOccs, terra::extract(wclim, ocOccs_spat))
 ocOccs <- ocOccs[complete.cases(data.frame(ocOccs)), ]
 
 eurExt <- extent(c(-20,35,30,90))
 ocEUR <- crop(ocOccs, eurExt)
+
+ausExt <- extent(c(100,160,-45,-10))
+ocAUS <- crop(ocOccs, ausExt)
+
+# Load and plot the coarse resolution world map
+data(countriesCoarse)
+
+par(mar = c(1, 0, 0, 0))
+plot(countriesCoarse, border = "gray80")
+points(ocEUR, pch = 16, col = 2, cex = 0.3)
+points(ocAUS, pch = 16, col = 4, cex = 0.3, add=T)
+
