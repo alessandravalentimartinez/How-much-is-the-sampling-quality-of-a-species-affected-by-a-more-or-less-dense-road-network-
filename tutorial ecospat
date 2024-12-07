@@ -148,6 +148,23 @@ for (col in 1:ncol(ocAUS.df)) {
 
 
 
+############# In una fase successiva, 
+#vogliamo calcolare le statistiche di base per ciascuna delle variabili climatiche 
+#sia per l'areale nativo che per quello invasivo.
+
+
+occEURstats <- apply(ocEUR.df, 2, function(x) c(min = min(x), median = median(x), mean = mean(x), max = max(x), sd = sd(x)))
+occAUSstats <- apply(ocAUS.df, 2, function(x) c(min = min(x), median = median(x), mean = mean(x), max = max(x), sd = sd(x)))
+
+# combine both statistics for direct comparison
+bioStats <- rbind(occEURstats, occAUSstats)
+head(bioStats[, c(1, 7, 12)], 10)
+
+
+
+
+
+
 
 
 
