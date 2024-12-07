@@ -275,7 +275,34 @@ ecospat.plot.overlap.test(sim.test, "D", "Similarity")
 
 
 
+##########################################################
 
+# gridding the native niche
+
+grid.clim.t.nat <- ecospat.grid.clim.dyn(glob = globalEnvM[,1],
+                                         glob1 = data.frame(eurEnvM[,1]),
+                                         data.frame(ocEUR)[,4], R = 1000, th.sp = 0)
+
+# gridding the invasive niche
+
+grid.clim.t.inv <- ecospat.grid.clim.dyn (glob = globalEnvM[,1], 
+                                          glob1 = data.frame(ausEnvM[,1]), 
+                                          data.frame(ocAUS)[,4], R = 1000, th.sp = 0)
+
+t.dyn <- ecospat.niche.dyn.index (grid.clim.t.nat, grid.clim.t.inv, intersection=0.1)
+
+ecospat.plot.niche.dyn(grid.clim.t.nat, grid.clim.t.inv, quant=0.1, interest=2, title= "Niche Overlap", name.axis1="Average temperature")
+
+# showing the shift of the niche centroid along the temperature gradient (compared to the shift of the available climate in the study area)
+
+ecospat.shift.centroids(data.frame(ocEUR)[,4],
+                        data.frame(ocAUS)[,4],
+                        data.frame(eurEnvM)[,1],
+                        data.frame(ausEnvM)[,1])
+
+
+
+################################################
 
 
 
