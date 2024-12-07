@@ -253,7 +253,24 @@ plot(countriesCoarse, add = TRUE)
 
 
 
+############################### Further methods and tests
 
+# calculate niche overlap
+
+ecospat.niche.overlap(nativeGrid, invasiveGrid, cor=T)
+
+
+eq.test <- ecospat.niche.equivalency.test(nativeGrid, invasiveGrid, rep = 100, ncores = 1)
+sim.test <- ecospat.niche.similarity.test(nativeGrid, invasiveGrid, rep = 100, rand.type = 2, ncores = 1)
+
+
+
+
+# plot Equivalency and Similarity Test
+
+par(mfrow=c(1,2))
+ecospat.plot.overlap.test(eq.test, "D", "Equivalency") 
+ecospat.plot.overlap.test(sim.test, "D", "Similarity")
 
 
 
