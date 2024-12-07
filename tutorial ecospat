@@ -1,0 +1,55 @@
+library(ecospat)
+library(raster)
+library(rgbif)
+library(maptools)
+library(devtools)
+library(terra)
+library(ade4)
+library(ape)
+library(biomod2)
+library(rworldmap)
+library(sp)
+library(geodata)
+
+``
+
+
+
+
+# Global occurrence of European rabbit
+ocGBIF <- occ_search(scientificName = "Oryctolagus cuniculus", 
+                     hasCoordinate = TRUE,
+                     basisOfRecord = "Preserved_Specimen",
+                     limit = 10000,
+                     fields = c("decimalLatitude",
+                                "decimalLongitude", 
+                                "year",
+                                "country", 
+                                "countryCode"))
+
+
+ocOccs <- ocGBIF$data
+
+
+coordinates(ocOccs) <- c("decimalLongitude",
+                         "decimalLatitude")
+
+
+
+# Download global bioclim data for the bio variables (temperature and precipitation) with 10-minute resolution
+wclim <- worldclim_global(var = "bio", res = 10, version = "2.1", path = tempdir())
+
+# Plot the bio1 variable (Mean Annual Temperature)
+par(mar = c(0, 0, 3, 1))  # Set plot margins
+plot(wclim$wc2.1_10m_bio_1, main = "Mean Annual Temperature [°C] (BIO1)")
+
+# Convert SpatRaster to RasterLayer (if you're using the raster package)
+wclim_raster <- raster(wclim)
+
+
+# Assuming 'ocOccs' is a SpatialPointsDataFrame
+ocOccs <- cbind(ocOccs, extract(wclim_raster, ocOccs))
+ocOccs <- ocOccs[complete.cases(data.frame(ocOccs)), ]
+
+eurExt <- extent(c(-20,35,30,90))
+ocEUR <- crop(ocOccs, eurExt)
