@@ -9,7 +9,7 @@ library(ade4)
 library(ape)
 library(biomod2)
 library(rworldmap)
-
+library(geodata)
 library(sp)
 
 
