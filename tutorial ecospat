@@ -326,6 +326,57 @@ nat.biomod <- BIOMOD_FormatingData(resp.var = as.numeric(data.frame(ocEUR)[,23])
 
 plot(nat.biomod)
 
+##################
+
+
+# Formatta i dati con BIOMOD_FormatingData
+
+bm.format <- BIOMOD_FormatingData(
+  resp.var = as.numeric(data.frame(ocEUR)[, 24]),  # Risposta binaria
+  expl.var = eurEnvR,                              # Variabili esplicative
+  resp.xy = data.frame(coordinates(ocEUR)),        # Coordinate
+  resp.name = "Oryctolagus.cuniculus",             # Nome della specie
+  PA.strategy = "random",                          # Strategia per pseudo-assenze
+  PA.nb.rep = 1,                                   # Numero di repliche
+  PA.nb.absences = 1000,
+  filter.raster = TRUE # Numero di pseudo-assenze
+)
+
+# Configura le opzioni di modellazione con bm.format
+biomodopt <- bm_ModelingOptions(
+  data.type = 'binary',
+  models = c('GLM'),
+  strategy = 'default',
+#  bm.format = bm.format    #togliere
+)
+
+# Calibrazione dei modelli bivariati semplici
+my.ESM <- ecospat.ESM.Modeling(
+  data = bm.format,  # Usa l'oggetto formattato
+  models = c('GLM'),
+  NbRunEval = 2,
+  DataSplit = 70,
+  weighting.score = c("AUC"),
+  models.options = biomodopt
+)
+
+# Creazione dei modelli Ensemble
+my.ESM_EF <- ecospat.ESM.EnsembleModeling(
+  ESM.modeling.output = my.ESM,
+  weighting.score = c("SomersD"),
+  threshold = 0
+)
+
+# Proiezione dei modelli
+ausEnvR <- stack(ausEnvR)
+my.ESM_proj_current <- ecospat.ESM.Projection(
+  ESM.modeling.output = my.ESM,
+  new.env = ausEnvR
+)
+my.ESM_EFproj_current <- ecospat.ESM.EnsembleProjection(
+  ESM.prediction.output = my.ESM_proj_current,
+  ESM.EnsembleModeling.output = my.ESM_EF
+)
 
 
 
