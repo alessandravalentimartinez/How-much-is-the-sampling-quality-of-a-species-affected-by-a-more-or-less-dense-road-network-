@@ -1,0 +1,115 @@
+library(terra)
+library(ecospat)
+library(dplyr)
+
+# Imposta la working directory
+setwd("C:/tesi")
+
+# Funzione per caricare i dati da ciascun CSV
+load_species_data <- function(file_path) {
+  data <- read.csv(file_path)
+  
+  # Verifica che ci siano colonne di coordinate (se esistono) e variabili ambientali
+  return(data)
+}
+
+
+
+library(dplyr)
+
+# Elenco delle specie, prevalenze e numeri di occorrenze
+species <- c(1, 2, 3, 4, 5)
+prevalences <- c(0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50)
+occurrences <- c(600, 700, 800, 900, 1000)
+
+# Percorso base dove si trovano i file CSV
+base_path <- "C:/tesi"
+
+# DataFrame per raccogliere tutti i dati
+all_data <- list()
+
+# Itera su ogni combinazione di specie, prevalenza e numero di occorrenze
+for (spec in species) {
+  for (prev in prevalences) {
+    for (occ in occurrences) {
+      # Crea il nome del file
+      file_name <- paste0("species_", spec, "_sp_prevalence_", prev, "_sample_prev_0.9_n_occ_", occ, ".csv")
+      file_path <- file.path(base_path, file_name)
+      
+      # Verifica se il file esiste
+      if (file.exists(file_path)) {
+        # Carica il file CSV
+        df <- read.csv(file_path)
+        
+        # Aggiungi le colonne 'species', 'prevalence', 'occurrences' per tracciare da dove provengono i dati
+        df$species <- spec
+        df$prevalence <- prev
+        df$occurrences <- occ
+        
+        # Aggiungi il DataFrame alla lista
+        all_data <- append(all_data, list(df))
+      }
+    }
+  }
+}
+
+# Combina tutti i DataFrame in uno solo
+final_data <- bind_rows(all_data)
+
+# Mostra le prime righe del DataFrame combinato
+head(final_data)
+
+
+# Assumiamo che le variabili ambientali siano già nel tuo dataset
+# Assicurati che le variabili siano correttamente nominate nel tuo DataFrame
+
+worldclim2.1_variables <- c(
+  "ann.mean.temp", 
+  "diurnal.temp.range.mean",
+  "isothermality",
+  "temp.seasonality",
+  "max.temp.warmest_month",
+  "min.temp.coldest_month",
+  "ann.temp.range",
+  "mean.temp.wettest_quarter",
+  "mean.temp.driest_quarter",
+  "mean.temp.warmest_quarter",
+  "mean.temp.coldest_quarter",
+  "ann.precip",
+  "precip.wettest_month",
+  "precip.driest_month",
+  "precip.seasonality",
+  "precip.wettest_quarter",
+  "precip.driest_quarter",
+  "precip.warmest_quarter",
+  "precip.coldest_quarter",
+  "x",
+  "y"
+)
+
+# Aggiungi le variabili per ogni specie
+final_data <- final_data %>%
+  select(x, y, species, prevalence, occurrences, starts_with("bio"))
+
+# Visualizza la struttura del dataset finale
+head(final_data)
+
+
+# Seleziona le colonne delle variabili climatiche
+clim_vars <- final_data[, c("ITA_wc2.1_30s_tmin_1", "ITA_wc2.1_30s_tmax_1", "ITA_wc2.1_30s_prec_1")]
+
+# Verifica che i dati siano stati correttamente estratti
+head(clim_vars)
+
+
+# Calcola la matrice di correlazione tra le variabili climatiche
+correlation_matrix <- cor(clim_vars)
+
+# Visualizza la matrice di correlazione
+print(correlation_matrix)
+
+# Puoi anche visualizzare un grafico della matrice di correlazione usando un pacchetto come corrplot
+library(corrplot)
+corrplot(correlation_matrix, method = "circle")
+
+##### così carica tutti i file
