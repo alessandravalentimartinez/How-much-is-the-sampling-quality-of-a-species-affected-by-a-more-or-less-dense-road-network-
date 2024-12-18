@@ -1,0 +1,331 @@
+library(sf)
+library(raster)
+library(virtualspecies)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(terra)
+library(geodata)
+library(osmdata)
+library(osmextract)
+library(ecospat)
+library(ade4)
+library(ape)
+library(biomod2)
+library(rworldmap)
+library(sp)
+
+
+
+
+# set wd
+setwd("C:/tesi")
+
+# upload shapefile
+aoi_sicilia <- st_read("sicilia.shp") %>% .$geometry 
+
+# plot region
+plot(aoi_sicilia)
+
+# bounding box 
+sicilia_bb <- st_bbox(aoi_sicilia)
+
+
+
+
+
+
+# bioclimatic variables from worldclim
+tmin <- worldclim_country("Ita", "tmin", path=tempdir(), res = 0.5, version = "2.1")
+tmax <- worldclim_country("Ita", "tmax", path=tempdir(), res = 0.5, version = "2.1")
+prec <- worldclim_country("Ita", "prec", path=tempdir(), res = 0.5, version = "2.1")
+
+# first month only
+tmin <- tmin$ITA_wc2.1_30s_tmin_1
+tmax <- tmax$ITA_wc2.1_30s_tmax_1
+prec <- prec$ITA_wc2.1_30s_prec_1
+
+# stack
+r_list <- c(tmin, tmax, prec)
+mydata <- raster::stack(r_list)
+
+# crop and mask by region borders
+aoi_sp <- sf::as_Spatial(aoi_sicilia)
+mydata_sicilia <- mydata %>% crop(., aoi_sp) %>% mask(., aoi_sp)
+
+# Rinomina i layer nel raster stack
+names(mydata_sicilia) <- c("Temperature Minimum", "Temperature Maximum", "Precipitation")
+
+# Controlla i nuovi nomi dei layer
+names(mydata_sicilia)
+
+# Plot per tmin (Temperature Minimum)
+plot(mydata_sicilia$`Temperature.Minimum`, main = "Temperature Minimum", col = viridis::viridis(100))
+
+# Plot per tmax (Temperature Maximum)
+plot(mydata_sicilia$`Temperature.Maximum`, main = "Temperature Maximum", col = viridis::viridis(100))
+
+# Plot per prec (Precipitation)
+plot(mydata_sicilia$Precipitation, main = "Precipitation", col = viridis::viridis(100))
+
+
+
+
+# Caricamento del dataset delle occorrenze
+data_specie1 <- read.csv("species_1_sp_prevalence_0.1_sample_prev_0.9_n_occ_600.csv")
+
+# Controlla i nomi delle colonne
+head(data_specie1)
+
+# Assumi che le colonne delle coordinate siano "X" e "Y"
+coordinates(data_specie1) <- c("X", "Y")  # Usa le colonne per le coordinate
+proj4string(data_specie1) <- CRS("+proj=longlat +datum=WGS84")  # Imposta il sistema di riferimento
+
+# Verifica
+print(data_specie1)
+
+# Plottare le occorrenze su una mappa globale
+library(rnaturalearth)
+world <- ne_countries(scale = "medium", returnclass = "sf")  # Mappa globale
+plot(st_geometry(world), col = "gray80", main = "Occorrenze su mappa globale")
+points(data_specie1, col = "red", pch = 16, cex = 0.5)  # Occorrenze come punti rossi
+
+# =======================
+# Aggiungere occorrenze al raster Sicilia
+# =======================
+# Assumi che 'mydata_sicilia' sia un oggetto raster con la maschera della Sicilia
+plot(mydata_sicilia$`Temperature.Minimum`, main = "Temperature Minimum", col = viridis::viridis(100))
+plot(aoi_sicilia, add = TRUE, border = "black")
+points(data_specie1, col = "red", pch = 16, cex = 0.5)  # Occorrenze della specie
+
+
+
+plot(mydata_sicilia$`Temperature.Maximum`, main = "Temperature Maximum", col = viridis::viridis(100))
+plot(aoi_sicilia, add = TRUE, border = "black")
+points(data_specie1, col = "red", pch = 16, cex = 0.5)  # Occorrenze della specie
+
+plot(mydata_sicilia$`Precipitation`, main = "Precipitation", col = viridis::viridis(100))
+plot(aoi_sicilia, add = TRUE, border = "black")
+points(data_specie1, col = "red", pch = 16, cex = 0.5)  # Occorrenze della specie
+
+
+
+########################################### PRE MODELING 
+
+
+# Estrazione dei dati climatici associati alle occorrenze della specie
+# Estrai direttamente le colonne climatiche
+sic_env <- data_specie1@data[, c("ITA_wc2.1_30s_tmin_1", 
+                                 "ITA_wc2.1_30s_tmax_1", 
+                                 "ITA_wc2.1_30s_prec_1")]
+
+# Rimuovi i valori mancanti
+sic_env <- sic_env[complete.cases(sic_env), ]
+
+
+#ripetere questo anche per lombardia
+
+
+
+# Combina i dati ambientali globali
+globalEnvM <- rbind(sic_env)  #aggiungere anche lombardia
+
+# Controlla i risultati
+print(dim(sic_env))      # Dimensioni del dataset europeo
+print(dim(globalEnvM))   # Dimensioni del dataset globale
+
+
+
+####################### pre stat
+
+# Rinomina le colonne climatiche
+colnames(sic_env) <- c("Temperature Minimum", "Temperature Maximum", "Precipitation")
+#colnames(lom_env) <- c("Temperature Minimum", "Temperature Maximum", "Precipitation")
+
+# Ricalcola le temperature in °C (da °C * 10)
+for (col in colnames(sic_env)) {
+  if (grepl("Temperature", col)) {
+    sic_env[[col]] <- sic_env[[col]] / 10
+  }
+}
+
+# Calcolo delle statistiche climatiche di base
+sic_stats <- apply(sic_env, 2, function(x) c(min = min(x), median = median(x), mean = mean(x), max = max(x), sd = sd(x)))
+#lom_stats <- apply(lom_env, 2, function(x) c(min = min(x), median = median(x), mean = mean(x), max = max(x), sd = sd(x)))
+
+# Combina i risultati
+bioStats <- rbind(Sicilia = sic_stats)#, Lombardia = lom_stats)
+
+# Visualizza alcune variabili per il confronto
+print(bioStats[, c("Temperature Minimum", "Temperature Maximum", "Precipitation")])
+
+
+
+##############################
+
+# 1. Aggiungi la colonna BIASED
+data_specie1$BIASED <- ifelse(data_specie1$distance == 0, TRUE, FALSE)  # consideriamo biased se distance == 0
+
+# 2. Controlla se la colonna è stata aggiunta correttamente
+head(data_specie1)
+
+# 3. Crea i subset separati per biased e non-biased
+biased_occurrences.df <- data_specie1[data_specie1$BIASED == TRUE, ]  # Occorrenze biased
+non_biased_occurrences.df <- data_specie1[data_specie1$BIASED == FALSE, ]  # Occorrenze non-biased
+
+
+
+biased_data <- biased_occurrences.df@data  # Ottieni solo i dati (senza le coordinate spaziali)
+head(biased_data)
+colnames(biased_data)
+
+
+# Isola le variabili climatiche (prime 3 colonne) e la distanza
+biased_occurrences_clim <- biased_data[, c("ITA_wc2.1_30s_tmin_1", "ITA_wc2.1_30s_tmax_1", "ITA_wc2.1_30s_prec_1")]
+
+# Estrai le coordinate geografiche dal dataframe spaziale
+coords <- biased_occurrences.df@coords  # Coordinate X e Y
+
+# Esegui Mantel correlogram per occorrenze biased
+ecospat.mantel.correlogram(
+  dfvar = biased_occurrences_clim,  # Variabili climatiche
+  colxy = 1:2,  # Colonne con le coordinate X e Y
+  n = 600,  # Numero di permutazioni
+  colvar = 1:3,  # Colonne per le variabili climatiche
+  max = 5,  # Limite massimo per la distanza
+  nclass = 10,  # Numero di classi
+  nperm = 100  # Numero di permutazioni
+)
+
+
+# 1. Isola le variabili climatiche per i dati non-biased
+non_biased_data <- non_biased_occurrences.df@data  # Ottieni solo i dati (senza le coordinate spaziali)
+head(non_biased_data)
+colnames(non_biased_data)
+
+# 2. Isola le variabili climatiche (prime 3 colonne) per le occorrenze non-biased
+non_biased_occurrences_clim <- non_biased_data[, c("ITA_wc2.1_30s_tmin_1", "ITA_wc2.1_30s_tmax_1", "ITA_wc2.1_30s_prec_1")]
+
+# 3. Estrai le coordinate geografiche dal dataframe spaziale per i dati non-biased
+non_biased_coords <- non_biased_occurrences.df@coords  # Coordinate X e Y
+
+# 4. Esegui Mantel correlogram per occorrenze non-biased
+ecospat.mantel.correlogram(
+  dfvar = non_biased_occurrences_clim,  # Variabili climatiche
+  colxy = 1:2,  # Colonne con le coordinate X e Y
+  n = 600,  # Numero di permutazioni
+  colvar = 1:3,  # Colonne per le variabili climatiche
+  max = 5,  # Limite massimo per la distanza
+  nclass = 10,  # Numero di classi
+  nperm = 100  # Numero di permutazioni
+)
+
+
+
+######## CORE MODELING
+
+
+# Isola le variabili climatiche per le occorrenze biased
+biased_data <- biased_occurrences.df@data  # Ottieni solo i dati (senza le coordinate spaziali)
+head(biased_data)
+colnames(biased_data)
+
+# Estrai le variabili climatiche per le occorrenze biased
+biased_envM <- biased_data[, c("ITA_wc2.1_30s_tmin_1", "ITA_wc2.1_30s_tmax_1", "ITA_wc2.1_30s_prec_1")]
+
+# Rimuovi i valori mancanti
+biased_envM <- biased_envM[complete.cases(biased_envM), ]
+print(dim(biased_envM))  # Controlla la dimensione della matrice
+
+# Per il caso non-biased:
+non_biased_data <- non_biased_occurrences.df@data  # Ottieni solo i dati (senza le coordinate spaziali)
+head(non_biased_data)
+colnames(non_biased_data)
+
+# Estrai le variabili climatiche per le occorrenze non-biased
+non_biased_envM <- non_biased_data[, c("ITA_wc2.1_30s_tmin_1", "ITA_wc2.1_30s_tmax_1", "ITA_wc2.1_30s_prec_1")]
+
+# Rimuovi i valori mancanti
+non_biased_envM <- non_biased_envM[complete.cases(non_biased_envM), ]
+print(dim(non_biased_envM))  # Controlla la dimensione della matrice
+
+
+
+# Esegui PCA per i dati climatici globali
+pca.clim <- dudi.pca(globalEnvM, center = TRUE,
+                     scale = TRUE, scannf = FALSE, nf = 2)
+
+# Estrai i punteggi PCA globali
+global.scores <- pca.clim$li
+
+# ####### PUNTEGGI PER I DATI BIASED
+# Estrai i punteggi per le occorrenze biased
+biasedLS.scores <- suprow(pca.clim,
+                          biased_occurrences.df@data[, colnames(globalEnvM)])$li
+
+# Estrai i punteggi per l'ambiente delle occorrenze biased (se applicabile)
+biasedEnv.scores <- suprow(pca.clim, biased_envM)$li  # Assicurati che "biased_envM" sia definito correttamente
+
+# ####### PUNTEGGI PER I DATI NON-BIASED
+# Estrai i punteggi per le occorrenze non-biased
+non_biasedLS.scores <- suprow(pca.clim,
+                              non_biased_occurrences.df@data[, colnames(globalEnvM)])$li
+
+# Estrai i punteggi per l'ambiente delle occorrenze non-biased (se applicabile)
+non_biasedEnv.scores <- suprow(pca.clim, non_biased_envM)$li  # Assicurati che "non_biased_envM" sia definito correttamente
+
+
+
+
+######### NICHE OVERLAP
+
+
+
+# Creazione delle griglie di densità delle occorrenze per biased e non-biased
+biasedGrid <- ecospat.grid.clim.dyn(global.scores, 
+                                    biasedEnv.scores, 
+                                    biasedLS.scores)
+
+nonBiasedGrid <- ecospat.grid.clim.dyn(global.scores, 
+                                       non_biasedEnv.scores, 
+                                       non_biasedLS.scores)
+
+# Plot dell'overlap tra le nicchie (biased vs non-biased)
+ecospat.plot.niche.dyn(biasedGrid, nonBiasedGrid, quant = 0.1, interest = 2, 
+                       title = "Niche Overlap: Biased vs Non-Biased", 
+                       name.axis1 = "PC1", name.axis2 = "PC2")
+
+# Plot delle contribuzioni delle variabili climatiche
+ecospat.plot.contrib(contrib = pca.clim$co, eigen = pca.clim$eig)
+
+
+
+
+##################################################
+
+
+
+# Step 1: Create the geographical grid (same grid for both datasets)
+geoGrid <- expand.grid(longitude = seq(st_bbox(aoi_sicilia)["xmin"], st_bbox(aoi_sicilia)["xmax"], length.out = 250),
+                       latitude = seq(st_bbox(aoi_sicilia)["ymin"], st_bbox(aoi_sicilia)["ymax"], length.out = 250))
+
+# Step 2: Mask by the region (Sicilia)
+mask_spat <- vect(aoi_sicilia)  # Convert Sicilia shapefile to SpatVector for masking
+
+# Step 3: Create the climatic grid for biased dataset
+earlyGeoGrid <- ecospat.grid.clim.dyn(geoGrid, geoGrid,
+                                      coordinates(biased_data),
+                                      geomask = mask_spat)
+
+# Step 4: Create the climatic grid for unbiased dataset
+lateGeoGrid <- ecospat.grid.clim.dyn(geoGrid, geoGrid,
+                                     coordinates(non_biased_data),
+                                     geomask = mask_spat)
+
+# Step 5: Plot the niche overlap for biased and unbiased occurrences
+ecospat.plot.niche.dyn(earlyGeoGrid, lateGeoGrid, quant = 0)
+
+# Step 6: Add the map of Sicilia
+plot(aoi_sicilia, add = TRUE, border = "black")
+
+ 
