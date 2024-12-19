@@ -232,3 +232,30 @@ ecospat.shift.centroids(data.frame(biased_occurrences.df)[,3],
 
 
 ########################################################################### Ensamble model
+
+
+
+#ocEUR$occ <- 1
+data_biased$occ<- 1
+#ocEUR_coords <- data.frame(coordinates(ocEUR))
+data_biased_coords <- data.frame(coordinates(data_biased))
+
+mydata_sicilia1 <- stack(mydata_sicilia)
+
+nat.biomod <- BIOMOD_FormatingData(resp.var = as.numeric(data.frame(data_biased)[,11]),
+                                   PA.strategy = "random",
+                                   PA.nb.rep = 1,
+                                   PA.nb.absences = 1000,
+                                   expl.var = mydata_sicilia1,
+                                   resp.xy = data_biased_coords,
+                                   resp.name = "",
+                                   filter.raster = TRUE)
+
+plot(nat.biomod)
+
+
+
+
+
+
+
