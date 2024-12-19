@@ -1,0 +1,234 @@
+# Caricamento delle librerie necessarie
+library(ecospat)
+library(raster)
+library(terra)
+library(sp)
+library(viridis)
+library(sf)
+library(markdown)
+library(rmarkdown)
+
+# Imposta la directory di lavoro
+setwd("C:/tesi")
+
+# Caricamento shapefile della Sicilia
+aoi_sicilia <- st_read("sicilia.shp") %>% .$geometry
+
+# Bounding box per delimitare l'area di studio
+sicilia_bb <- st_bbox(aoi_sicilia)
+
+# Variabili bioclimatiche dal WorldClim
+tmin <- worldclim_country("Ita", "tmin", path = tempdir(), res = 0.5, version = "2.1")
+tmax <- worldclim_country("Ita", "tmax", path = tempdir(), res = 0.5, version = "2.1")
+prec <- worldclim_country("Ita", "prec", path = tempdir(), res = 0.5, version = "2.1")
+
+# Selezione del primo mese
+tmin <- tmin$ITA_wc2.1_30s_tmin_1
+tmax <- tmax$ITA_wc2.1_30s_tmax_1
+prec <- prec$ITA_wc2.1_30s_prec_1
+
+# Creazione di uno stack raster
+r_list <- c(tmin, tmax, prec)
+mydata <- raster::stack(r_list)
+
+plot(mydata)
+
+# Crop e mask dei raster per l'area della Sicilia
+aoi_sp <- sf::as_Spatial(aoi_sicilia)
+mydata_sicilia <- mydata %>% crop(., aoi_sp) %>% mask(., aoi_sp)
+
+# Rinomina i layer nel raster stack
+names(mydata_sicilia) <- c("Temperature Minimum", "Temperature Maximum", "Precipitation")
+
+
+
+# Plot per tmin (Temperature Minimum)
+plot(mydata_sicilia$`Temperature.Minimum`, main = "Temperature Minimum", col = viridis::viridis(100))
+
+# Plot per tmax (Temperature Maximum)
+plot(mydata_sicilia$`Temperature.Maximum`, main = "Temperature Maximum", col = viridis::viridis(100))
+
+# Plot per prec (Precipitation)
+plot(mydata_sicilia$Precipitation, main = "Precipitation", col = viridis::viridis(100))
+
+
+
+
+#################################################
+
+
+# Caricamento del dataset delle occorrenze
+data_specie1 <- read.csv("species_1_sp_prevalence_0.1_sample_prev_0.9_n_occ_600.csv")
+
+data_biased <- subset(data_specie1, distance == 0)
+data_unbiased <- subset(data_specie1, distance > 0)
+
+# Conversione in oggetti spaziali
+coordinates(data_biased) <- c("X", "Y")
+proj4string(data_biased) <- CRS("+proj=longlat +datum=WGS84")
+
+coordinates(data_unbiased) <- c("X", "Y")
+proj4string(data_unbiased) <- CRS("+proj=longlat +datum=WGS84")
+
+
+
+# Visualizzazione delle occorrenze biased e unbiased sulla mappa della Sicilia
+par(mfrow = c(1, 2))
+plot(aoi_sicilia, main = "Occorrenze Biased", border = "black", xlab = "", ylab = "", xaxt = "n", yaxt = "n")
+axis(1)
+axis(2)
+points(data_biased, col = "red", pch = 16, cex = 0.5)
+box()
+
+plot(aoi_sicilia, main = "Occorrenze Unbiased", border = "black", xlab = "", ylab = "", xaxt = "n", yaxt = "n")
+axis(1)
+axis(2)
+points(data_unbiased, col = "blue", pch = 16, cex = 0.5)
+box()
+
+
+
+#################################################### pre analysis
+
+# Estrarre valori climatici per le occorrenze
+biased_env <- raster::extract(mydata_sicilia, data_biased)
+unbiased_env <- raster::extract(mydata_sicilia, data_unbiased)
+
+# Rimuovere valori NA
+biased_env <- biased_env[complete.cases(biased_env), ]
+unbiased_env <- unbiased_env[complete.cases(unbiased_env), ]
+
+
+globalenvm <- rbind(biased_env, unbiased_env)
+
+# Calcolo statistiche di base
+biased_stats <- apply(biased_env, 2, function(x) c(min = min(x), median = median(x), mean = mean(x), max = max(x), sd = sd(x)))
+unbiased_stats <- apply(unbiased_env, 2, function(x) c(min = min(x), median = median(x), mean = mean(x), max = max(x), sd = sd(x)))
+
+# Combina entrambe le statistiche per un confronto diretto
+bioStats <- rbind(biased_stats, unbiased_stats)
+head(bioStats)
+
+# Mantel correlogram for biased occurrences (using the correct column indices for 3 environmental variables)
+ecospat.mantel.correlogram(dfvar=biased_env, colxy=1:2, n=100, colvar=1:3, 
+                           max=5, nclass=10, nperm=100)
+
+# Mantel correlogram for unbiased occurrences (using the correct column indices for 3 environmental variables)
+ecospat.mantel.correlogram(dfvar=unbiased_env, colxy=1:2, n=100, colvar=1:3, 
+                           max=5, nclass=10, nperm=100)
+
+
+
+
+
+
+
+############################################# CORE MODELING
+
+# PCA per il confronto tra biased e unbiased
+all_env <- rbind(biased_env, unbiased_env)
+pca_clim <- dudi.pca(as.data.frame(all_env), center = TRUE, scale = TRUE, scannf = FALSE, nf = 2)
+
+# Occurrence Density Grid
+global_scores <- pca_clim$li
+biased_scores <- suprow(pca_clim, biased_env)$li
+unbiased_scores <- suprow(pca_clim, unbiased_env)$li
+
+
+
+biased_grid <- ecospat.grid.clim.dyn(global_scores, biased_scores, biased_scores)
+unbiased_grid <- ecospat.grid.clim.dyn(global_scores, unbiased_scores, unbiased_scores)
+
+# Plot del niche overlap
+ecospat.plot.niche.dyn(biased_grid, unbiased_grid, quant = 0.1, interest = 2, 
+                       title = "Niche Overlap", name.axis1 = "PC1", name.axis2 = "PC2")
+
+ecospat.plot.contrib(contrib = pca_clim$co, eigen = pca_clim$eig)
+
+
+# Calcola l'indice dinamico per il confronto tra biased e unbiased
+dynamic_index_biased_unbiased <- ecospat.niche.dyn.index(biased_grid, unbiased_grid, intersection = 0.1)$dynamic.index.w
+
+# Visualizza il risultato
+print(dynamic_index_biased_unbiased)
+
+
+
+##############################################
+
+
+sicilia_shapefile <- st_read("C:/tesi/Sicilia.shp")  # Carica il tuo shapefile della Sicilia
+
+# Creazione della griglia geografica (adatta per la Sicilia o altra area di interesse)
+geoGrid <- expand.grid(longitude = 
+                         seq(11.92587, 15.65330, length.out = 250),  # Modifica questi valori per la tua area geografica
+                       latitude = 
+                         seq(35.49345, 38.81213, length.out = 250))  # Modifica questi valori per la tua area geografica
+
+# Converti il SpatialPolygonsDataFrame della Sicilia in un oggetto SpatVector
+mask_spat <- vect(sicilia_shapefile)
+
+# Creazione della griglia climatica dinamica (biased)
+biasedGeoGrid <- ecospat.grid.clim.dyn(geoGrid, geoGrid,
+                                       coordinates(data_biased),  # Sostituisci con i tuoi dati biased
+                                       geomask = mask_spat)  # Usa la maschera geografica della Sicilia
+
+# Creazione della griglia climatica dinamica (unbiased)
+unbiasedGeoGrid <- ecospat.grid.clim.dyn(geoGrid, geoGrid,
+                                         coordinates(data_unbiased),  # Sostituisci con i tuoi dati unbiased
+                                         geomask = mask_spat)  # Usa la maschera geografica della Sicilia
+
+# Plot delle nicchie dinamiche per i due periodi (early e late)
+ecospat.plot.niche.dyn(biasedGeoGrid, unbiasedGeoGrid, quant = 0)
+
+plot(sicilia_shapefile$geometry, add = TRUE)
+
+
+
+##################################################################### Further methods and tests
+
+# Calcolo dell'overlap e test
+overlap <- ecospat.niche.overlap(biased_grid, unbiased_grid, cor = TRUE)
+eq_test <- ecospat.niche.equivalency.test(biased_grid, unbiased_grid, rep = 100, ncores = 1)
+sim_test <- ecospat.niche.similarity.test(biased_grid, unbiased_grid, rep = 100, rand.type = 2, ncores = 1)
+
+# Plot test di equivalenza e similarità
+par(mfrow = c(1, 2))
+ecospat.plot.overlap.test(eq_test, "D", "Equivalency")
+ecospat.plot.overlap.test(sim_test, "D", "Similarity")
+
+
+
+##################################################
+
+# gridding biased
+
+grid.clim.t.bias <- ecospat.grid.clim.dyn(glob = globalenvm[,1],
+                                         glob1 = data.frame(biased_env[,1]),
+                                         data.frame(biased_occurrences.df)[,3], R = 1000, th.sp = 0)
+
+
+# gridding unbiased
+
+grid.clim.t.unbia <- ecospat.grid.clim.dyn (glob = globalenvm[,1], 
+                                          glob1 = data.frame(unbiased_env[,1]), 
+                                          data.frame(non_biased_occurrences.df)[,3], R = 1000, th.sp = 0)
+
+
+
+
+t.dyn <- ecospat.niche.dyn.index (grid.clim.t.bias, grid.clim.t.unbia, intersection=0.1)
+
+ecospat.plot.niche.dyn(grid.clim.t.bias, grid.clim.t.unbia, quant=0.1, interest=2, title= "Niche Overlap", name.axis1="Min Temperature")
+
+# showing the shift of the niche centroid along the temperature gradient (compared to the shift of the available climate in the study area)
+
+ecospat.shift.centroids(data.frame(biased_occurrences.df)[,3],
+                        data.frame(non_biased_occurrences.df)[,3],
+                        data.frame(biased_env)[,1],
+                        data.frame(unbiased_env)[,1])
+
+
+
+
+########################################################################### Ensamble model
