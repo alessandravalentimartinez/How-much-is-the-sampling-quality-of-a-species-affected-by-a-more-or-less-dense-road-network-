@@ -255,6 +255,78 @@ plot(nat.biomod)
 
 
 
+###################################################################
+
+
+# Formatta i dati con BIOMOD_FormatingData
+
+bm.format <- BIOMOD_FormatingData(
+  resp.var = as.numeric(data.frame(data_biased)[, 11]),  # Risposta binaria per la specie
+  expl.var = mydata_sicilia1,                             # Variabili esplicative (dati climatici per la Sicilia)
+  resp.xy = data.frame(coordinates(data_biased)),        # Coordinate delle occorrenze biased
+  resp.name = "",                            # Nome della specie virtuale (modificato)
+  PA.strategy = "random",                                  # Strategia per pseudo-assenze
+  PA.nb.rep = 1,                                           # Numero di repliche per le pseudo-assenze
+  PA.nb.absences = 1000,
+  filter.raster = TRUE                                     # Attiva il filtro per le variabili raster
+)
+
+# Configura le opzioni di modellazione con bm.format
+biomodopt <- bm_ModelingOptions(
+  data.type = 'binary',                                   # Tipo di dati: binari (presenza/assenza)
+  models = c('GLM'),                                      # Modelli da usare: GLM (Generalized Linear Models)
+  strategy = 'default', 
+  bm.format = bm.format
+)
+
+# Estrai i valori delle variabili climatiche per le occorrenze
+temp_min <- extract(mydata_sicilia1[["Temperature.Minimum"]], coordinates(data_biased))
+temp_max <- extract(mydata_sicilia1[["Temperature.Maximum"]], coordinates(data_biased))
+precipitation <- extract(mydata_sicilia1[["Precipitation"]], coordinates(data_biased))
+
+# Visualizza i risultati per verificare
+head(temp_min)
+head(temp_max)
+head(precipitation)
+
+
+
+# Calibrazione dei modelli bivariati semplici
+my.ESM <- ecospat.ESM.Modeling(
+  data = bm.format,                                       # Usa l'oggetto formattato
+  models = c('GLM'),                                      # Specifica il modello GLM
+  NbRunEval = 2,                                          # Numero di esecuzioni di valutazione
+  DataSplit = 70,                                         # Percentuale dei dati da utilizzare per l'addestramento (70%)
+  weighting.score = c("AUC"),                             # Metodo di valutazione: AUC
+  models.options = biomodopt                              # Opzioni per i modelli
+)
+
+
+
+
+
+
+# Creazione dei modelli Ensemble
+my.ESM_EF <- ecospat.ESM.EnsembleModeling(
+  ESM.modeling.output = my.ESM,                           # Risultato del modello ESM
+  weighting.score = c("SomersD"),                         # Score di ponderazione: SomersD
+  threshold = 0                                           # Imposta la soglia di proiezione a 0
+)
+
+# Proiezione dei modelli
+my.ESM_proj_current <- ecospat.ESM.Projection(
+  ESM.modeling.output = my.ESM,                           # Risultati del modello
+  new.env = mydata_sicilia1                              # Nuovo ambiente di proiezione (dati climatici per la Sicilia)
+)
+
+# Proiezione dell'Ensemble
+my.ESM_EFproj_current <- ecospat.ESM.EnsembleProjection(
+  ESM.prediction.output = my.ESM_proj_current,            # Previsioni dal modello ESM
+  ESM.EnsembleModeling.output = my.ESM_EF                 # Modello Ensemble ESM
+)
+
+
+
 
 
 
