@@ -1,0 +1,161 @@
+library(sf)
+library(raster)
+library(virtualspecies)
+library(dplyr)
+library(terra)
+library(geodata)
+library(tidyverse)
+library(ggplot2)
+library(viridis)
+library(osmdata)  # Added for OSM data handling
+
+# Set working directory
+setwd("C:/tesi")
+
+# Create output directory
+output_dir <- "Specie virtuali/Specie virtualia sicilia"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Load shapefile
+sicilia_shp <- st_read("sicilia.shp")
+plot(sicilia_shp)
+
+# Load OSM roads data for Sicily
+osm_aoi_roads_sicilia <- osmdata::opq(bbox = st_bbox(sicilia_shp)) %>%
+  osmdata::add_osm_feature(key = "highway") %>%
+  osmdata::osmdata_sf()
+
+if (is.null(osm_aoi_roads_sicilia$osm_lines)) {
+  stop("No road data found for the specified area.")
+}
+
+# Bioclimatic variables
+bio_vars <- c(
+  worldclim_country("Ita", "tmin", path=tempdir(), res=0.5, version="2.1")$ITA_wc2.1_30s_tmin_1,
+  worldclim_country("Ita", "tmax", path=tempdir(), res=0.5, version="2.1")$ITA_wc2.1_30s_tmax_1,
+  worldclim_country("Ita", "prec", path=tempdir(), res=0.5, version="2.1")$ITA_wc2.1_30s_prec_1
+)
+
+# Prepare raster stack
+mydata <- stack(bio_vars) %>% crop(., st_as_sf(sicilia_shp)) %>% mask(., st_as_sf(sicilia_shp))
+
+# Generate distance raster
+generate_distance_raster <- function(roads_geometry, raster_template, polygon) {
+  roads_vect <- terra::vect(roads_geometry)
+  rasterized_roads <- terra::rasterize(roads_vect, raster_template)
+  distance_raster <- terra::distance(rasterized_roads, unit="km")
+  cropped_raster <- terra::crop(distance_raster, polygon)
+  terra::mask(cropped_raster, polygon)
+}
+
+d_rast_sicilia <- generate_distance_raster(osm_aoi_roads_sicilia$osm_lines$geometry, mydata[[1]], sicilia_shp)
+
+# Calculate sampling probability
+c <- 1
+sampling_prob_sicilia <- 1 - (log(c * values(d_rast_sicilia)) / log(max(c * values(d_rast_sicilia), na.rm = TRUE)))
+sampling_prob_sicilia[is.infinite(sampling_prob_sicilia)] <- 1
+sampling_prob_sicilia[sampling_prob_sicilia > 1] <- 1
+prob_raster_sicilia <- terra::classify(d_rast_sicilia, cbind(values(d_rast_sicilia), sampling_prob_sicilia))
+
+# Plot distance raster
+distance_plot_data <- terra::as.data.frame(d_rast_sicilia, xy = TRUE)
+distance_column <- names(distance_plot_data)[3]
+ggplot() +
+  geom_tile(data = distance_plot_data, aes(x = x, y = y, fill = !!sym(distance_column))) +
+  scale_fill_viridis_c(option = "D", alpha = 1, begin = 0, end = 1) +
+  geom_sf(data = osm_aoi_roads_sicilia$osm_lines, color = "black", size = 0.5) +
+  theme_bw() +
+  labs(title = "Distance from Roads (km)",
+       fill = "Distance (km)") +
+  coord_sf() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  ) +
+  scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +
+  scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))
+
+# Plot sampling probability
+probability_plot_data <- terra::as.data.frame(prob_raster_sicilia, xy = TRUE)
+probability_column <- names(probability_plot_data)[3]
+ggplot() +
+  geom_tile(data = probability_plot_data, aes(x = x, y = y, fill = !!sym(probability_column))) +
+  scale_fill_viridis_c(option = "D", alpha = 1, begin = 0, end = 1) +
+  geom_sf(data = osm_aoi_roads_sicilia$osm_lines, color = "black", size = 0.5) +
+  theme_bw() +
+  labs(title = "Sampling Probability",
+       fill = "Probability") +
+  coord_sf() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank()
+  ) +
+  scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +
+  scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))
+
+# Function to generate and save species
+generate_and_save_species <- function(sp_prevalence, n_occ, n_species, output_dir) {
+  for (species_num in seq_len(n_species)) {
+    random_sp <- generateRandomSp(
+      raster.stack = mydata,
+      convert.to.PA = FALSE,
+      species.type = "multiplicative",
+      approach = "response",
+      relations = "gaussian",
+      realistic.sp = TRUE,
+      plot = FALSE
+    )
+
+    new_pres <- convertToPA(
+      random_sp,
+      beta = "random",
+      alpha = -0.05,
+      species.prevalence = sp_prevalence,
+      plot = FALSE
+    )
+
+    presence_points <- sampleOccurrences(
+      new_pres,
+      n = n_occ,
+      type = "presence only",
+      sample.prevalence = 0.9,
+      error.probability = 0,
+      detection.probability = 1,
+      correct.by.suitability = TRUE,
+      plot = FALSE
+    )
+
+    initial_occ <- presence_points$sample.points %>%
+      as.data.frame() %>%
+      filter(Real == 1 & Observed == 1) %>%
+      st_as_sf(coords = c("x", "y"))
+
+    # Add variables to occurrences
+    initial_occ_bio_var <- bind_cols(
+      terra::extract(mydata, initial_occ),
+      terra::extract(d_rast_sicilia, initial_occ)
+    )
+    initial_occ_bio_var <- initial_occ_bio_var %>%
+      rename(distance = layer, suitability = VSP.suitability) %>%
+      mutate(
+        UNBIASED = TRUE,
+        BIASED = distance == 1
+      )
+
+    file_name <- sprintf(
+      "species_%02d_sp_prevalence_%.2f_n_occ_%d.csv",
+      species_num, sp_prevalence, n_occ
+    )
+    write.csv(initial_occ_bio_var, file.path(output_dir, file_name), row.names = FALSE)
+  }
+}
+
+# Loop over parameters
+prevalences <- seq(0.05, 0.5, by = 0.05)
+occur_values <- seq(600, 1000, by = 100)
+
+for (sp_prev in prevalences) {
+  for (n_occ in occur_values) {
+    generate_and_save_species(sp_prev, n_occ, 5, output_dir)
+  }
+}
