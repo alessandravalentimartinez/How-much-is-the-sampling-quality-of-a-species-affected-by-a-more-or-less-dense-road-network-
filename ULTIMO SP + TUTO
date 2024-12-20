@@ -1,0 +1,101 @@
+library(ecospat)
+library(raster)
+library(terra)
+library(dplyr)
+library(sf)
+
+# Funzione per analizzare le specie virtuali
+analyze_virtual_species <- function(input_dir, output_dir, mydata, aoi) {
+  # Lista di file CSV delle specie virtuali
+  species_files <- list.files(input_dir, pattern = "*.csv", full.names = TRUE)
+  
+  # Loop su ogni file
+  for (species_file in species_files) {
+    # Carica i dati della specie
+    species_data <- read.csv(species_file)
+    
+    # Ottieni informazioni dal nome del file (prevalence, occurrences, ecc.)
+    file_info <- strsplit(basename(species_file), "_")[[1]]
+    prevalence <- as.numeric(gsub("sp_prevalence_", "", file_info[2]))
+    occurrences <- as.numeric(gsub("n_occ_", "", gsub("\\.csv", "", file_info[4])))
+    
+    # Subset dei dati biased e unbiased
+    biased <- species_data[species_data$distance == 0, ]
+    unbiased <- species_data[species_data$distance > 0, ]
+    
+    # Rimuovi NA e calcola le metriche
+    biased_env <- raster::extract(mydata, biased[, c("X", "Y")]) %>% na.omit()
+    unbiased_env <- raster::extract(mydata, unbiased[, c("X", "Y")]) %>% na.omit()
+    
+    # PCA per i dati climatici
+    combined_env <- rbind(biased_env, unbiased_env)
+    pca_clim <- dudi.pca(as.data.frame(combined_env), center = TRUE, scale = TRUE, scannf = FALSE, nf = 2)
+    
+    # Griglie climatiche
+    biased_scores <- suprow(pca_clim, biased_env)$li
+    unbiased_scores <- suprow(pca_clim, unbiased_env)$li
+    global_scores <- pca_clim$li
+    
+    biased_grid <- ecospat.grid.clim.dyn(global_scores, biased_scores, biased_scores)
+    unbiased_grid <- ecospat.grid.clim.dyn(global_scores, unbiased_scores, unbiased_scores)
+    
+    # Calcolo del niche overlap
+    niche_overlap <- ecospat.niche.dyn.index(biased_grid, unbiased_grid, intersection = 0.1)
+    d_value <- niche_overlap$dynamic.index.w["D"]
+    i_value <- niche_overlap$dynamic.index.w["I"]
+    
+    # Calcolo della curva di accumulazione
+    accumulation_results <- data.frame(
+      "NUM_OCCURRENCES" = numeric(),
+      "D" = numeric(),
+      "I" = numeric()
+    )
+    
+    for (i in 1:nrow(species_data)) {
+      current_occurrences <- species_data[1:i, ]
+      biased_acc <- current_occurrences[current_occurrences$distance == 0, ]
+      unbiased_acc <- current_occurrences[current_occurrences$distance > 0, ]
+      
+      biased_env_acc <- raster::extract(mydata, biased_acc[, c("X", "Y")]) %>% na.omit()
+      unbiased_env_acc <- raster::extract(mydata, unbiased_acc[, c("X", "Y")]) %>% na.omit()
+      
+      biased_scores_acc <- suprow(pca_clim, biased_env_acc)$li
+      unbiased_scores_acc <- suprow(pca_clim, unbiased_env_acc)$li
+      
+      biased_grid_acc <- ecospat.grid.clim.dyn(global_scores, biased_scores_acc, biased_scores_acc)
+      unbiased_grid_acc <- ecospat.grid.clim.dyn(global_scores, unbiased_scores_acc, unbiased_scores_acc)
+      
+      niche_overlap_acc <- ecospat.niche.dyn.index(biased_grid_acc, unbiased_grid_acc, intersection = 0.1)
+      d_acc <- niche_overlap_acc$dynamic.index.w["D"]
+      i_acc <- niche_overlap_acc$dynamic.index.w["I"]
+      
+      accumulation_results <- rbind(
+        accumulation_results,
+        data.frame("NUM_OCCURRENCES" = i, "D" = d_acc, "I" = i_acc)
+      )
+    }
+    
+    # Salva i risultati
+    output_file <- file.path(
+      output_dir,
+      sprintf("results_species_prevalence_%.2f_occ_%d.csv", prevalence, occurrences)
+    )
+    write.csv(accumulation_results, output_file, row.names = FALSE)
+  }
+}
+
+# Imposta directory di input e output
+input_directory <- "Specie virtuali/Specie virtualia sicilia"  # Sostituisci con il percorso corretto
+output_directory <- "Specie virtuali/Analisi"
+dir.create(output_directory, recursive = TRUE, showWarnings = FALSE)
+
+# Carica dati climatici e area di interesse (Sicilia)
+mydata_sicilia <- stack(
+  worldclim_country("Ita", "tmin", path = tempdir(), res = 0.5, version = "2.1")$ITA_wc2.1_30s_tmin_1,
+  worldclim_country("Ita", "tmax", path = tempdir(), res = 0.5, version = "2.1")$ITA_wc2.1_30s_tmax_1,
+  worldclim_country("Ita", "prec", path = tempdir(), res = 0.5, version = "2.1")$ITA_wc2.1_30s_prec_1
+)
+aoi_sicilia <- st_read("sicilia.shp")
+
+# Esegui analisi
+analyze_virtual_species(input_directory, output_directory, mydata_sicilia, aoi_sicilia)
