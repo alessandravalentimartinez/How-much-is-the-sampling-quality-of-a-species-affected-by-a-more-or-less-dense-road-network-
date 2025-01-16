@@ -42,11 +42,11 @@ prec <- prec$ITA_wc2.1_30s_prec_1
 
 # stack
 r_list <- c(tmin, tmax, prec)
-mydata <- raster::stack(r_list)
+mydata_sicilia <- raster::stack(r_list)
 
 # crop and mask by region borders
 aoi_sp <- sf::as_Spatial(aoi_sicilia)
-mydata <- mydata %>% crop(., aoi_sp) %>% mask(., aoi_sp)
+mydata_sicilia <- mydata_sicilia %>% crop(., aoi_sp) %>% mask(., aoi_sp)
 
 # Rinomina i layer nel raster stack
 names(mydata_sicilia) <- c("Temperature Minimum", "Temperature Maximum", "Precipitation")
