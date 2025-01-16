@@ -1,0 +1,216 @@
+# Carica i pacchetti necessari
+library(sf)
+library(raster)
+library(virtualspecies)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(terra)
+library(geodata)
+library(osmdata)
+library(osmextract)
+
+# Imposta la working directory
+setwd("C:/tesi")
+
+# Carica il shapefile
+aoi_sicilia <- st_read("sicilia.shp") %>% .$geometry
+
+# Plot della regione
+plot(aoi_sicilia)
+
+# Ottieni la bounding box della regione
+sicilia_bb <- st_bbox(aoi_sicilia)
+
+# Dati OSM per le strade secondarie
+ht_secondary <- "secondary"
+
+# Scarica i dati delle strade da OSM
+osm_sicilia <- oe_get("Sicilia", stringsAsFactors = FALSE, quiet = TRUE)
+osm_sicilia_roads <- osm_sicilia[osm_sicilia$highway %in% ht_secondary, ]
+
+# Carica le variabili bioclimatiche da WorldClim
+tmin <- worldclim_country("Ita", "tmin", path=tempdir(), res = 0.5, version = "2.1")
+tmax <- worldclim_country("Ita", "tmax", path=tempdir(), res = 0.5, version = "2.1")
+prec <- worldclim_country("Ita", "prec", path=tempdir(), res = 0.5, version = "2.1")
+
+# Prendi solo il primo mese
+tmin <- tmin$ITA_wc2.1_30s_tmin_1
+tmax <- tmax$ITA_wc2.1_30s_tmax_1
+prec <- prec$ITA_wc2.1_30s_prec_1
+
+# Crea lo stack dei raster
+r_list <- c(tmin, tmax, prec)
+mydata_sicilia <- raster::stack(r_list)
+
+# Crop e maschera il raster con i confini della regione
+aoi_sp <- sf::as_Spatial(aoi_sicilia)
+mydata_sicilia <- mydata_sicilia %>% crop(., aoi_sp) %>% mask(., aoi_sp)
+
+# Rinomina i layer nel raster stack
+names(mydata_sicilia) <- c("Temperature Minimum", "Temperature Maximum", "Precipitation")
+
+# Crea il vettore delle strade OSM
+roads_vect <- terra::vect(osm_sicilia_roads$geometry)
+
+# Rasterizza le strade
+raster_roads <- as(mydata_sicilia[[1]], "SpatRaster")
+r <- terra::rasterize(roads_vect, raster_roads)
+d <- distance(r, unit = "km")
+
+# Raster delle distanze
+d_raster <- d %>% raster()
+
+# Probabilità di campionamento
+distances <- d_raster %>% as.data.frame()
+c <- 1
+sampling_prob <- 1 - (((log(c * distances)) / (log(max(c * distances))))) %>% as.data.frame()
+
+sampling_prob[sampling_prob == Inf] <- 1
+sampling_prob[sampling_prob > 1] <- 1
+
+# Probabilità come raster
+prob_raster <- classify(d, cbind(values(d), sampling_prob))
+
+# parameters to be saved
+# sample prevalence
+sample_prev <- 0.9
+
+# number of species
+n_species <- 5
+
+
+# Ciclo per generare le specie virtuali per ogni combinazione di prevalenza della specie e occorrenze
+sp_prev_values <- seq(0.05, 0.50, by = 0.05)
+n_occ_values <- c(600, 700, 800, 900, 1000)
+
+# Crea un file log per tracciare l'avanzamento
+log_file <- "generation_log.txt"
+cat("Inizio della generazione delle specie virtuali\n", file = log_file)
+
+# Ciclo per le combinazioni
+for (sp_prev in sp_prev_values) {
+  for (n_occ in n_occ_values) {
+    
+    # Log dell'inizio di una nuova combinazione
+    cat(paste("Inizio generazione per prevalenza", sp_prev, "e occorrenze", n_occ, "\n"), file = log_file, append = TRUE)
+    
+    # Genera 5 specie virtuali per ogni combinazione
+    for (species_num in 1:5) {
+      
+      tryCatch({
+        # Log della creazione della specie
+        cat(paste("Generazione specie", species_num, "per prevalenza", sp_prev, "e occorrenze", n_occ, "\n"), file = log_file, append = TRUE)
+        
+        # Genera la specie virtuale
+        random.sp <- generateRandomSp(raster.stack = mydata_sicilia,
+                                      convert.to.PA = FALSE,
+                                      species.type = "multiplicative",
+                                      approach = "response",
+                                      relations = "gaussian",
+                                      realistic.sp = TRUE,
+                                      plot = FALSE)
+        
+        # Prevalenza della specie
+        new.pres <- convertToPA(random.sp,
+                                beta = "random",
+                                alpha = -0.05, plot = FALSE,
+                                species.prevalence = sp_prev)
+        
+        # Occorrenze casuali
+        presence.points <- sampleOccurrences(new.pres,
+                                             n = n_occ,
+                                             type = "presence only",
+                                             sample.prevalence = 0.9,
+                                             error.probability = 0,
+                                             detection.probability = 1,
+                                             correct.by.suitability = TRUE,
+                                             plot = FALSE)
+        
+        # Occorrenze come punti
+        initial_occ <- presence.points$sample.points %>%
+          as.data.frame() %>%
+          .[.$Real == 1 & .$Observed == 1, ] %>%
+          st_as_sf(., coords = c("x","y"))
+        
+        # Aggiungi i valori bioclimatici
+        drops <- c("Real", "Observed")
+        initial_occ_bio_var <- terra::extract(mydata_sicilia, initial_occ) %>%
+          cbind(., initial_occ) %>%
+          st_set_crs(4326) %>%
+          .[, !(names(.) %in% drops)]
+        
+        # Aggiungi le distanze
+        initial_occ_bio_var <- d_raster %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rinomina la colonna delle distanze
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+        
+        # Aggiungi la suitability
+        initial_occ_bio_var <- random.sp$suitab.raster %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rinomina la colonna della suitability
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+        
+        # Aggiungi la probabilità di essere campionati per ogni punto
+        initial_occ_bio_var <- prob_raster %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rinomina la colonna della probabilità
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+        
+        # Colonne unbiased e biased
+        initial_occ_bio_var <- initial_occ_bio_var %>%
+          mutate(
+            UNBIASED = TRUE, 
+            BIASED = probability == 1
+          )
+        
+        # Crea un dataframe
+        df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+        
+        # Aggiungi variabili e rimuovi la colonna 'geometry'
+        df <- cbind(df, initial_occ_bio_var[, !(names(initial_occ_bio_var) %in% c("geometry"))])
+        df$geometry <- NULL
+        
+        # Gestisci eventuali NA nel dataframe
+        if (any(is.na(df))) {
+          cat(paste("NA trovati nella specie", species_num, "per prevalenza", sp_prev, "e occorrenze", n_occ, "\n"), file = log_file, append = TRUE)
+          # Puoi scegliere di sostituire gli NA con un valore, ad esempio 0 o la media, o semplicemente rimuoverli
+          df[is.na(df)] <- 0  # Sostituisce tutti gli NA con 0 (puoi modificare questa parte come preferisci)
+        }
+        
+        # Salva come CSV
+        file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prev, 
+                            "_sample_prev_0.9_n_occ_", n_occ, ".csv")
+        
+        # Scrittura del file CSV
+        write.csv(df, file_name, row.names = FALSE)
+        
+        # Log del successo
+        cat(paste("Specie", species_num, "per prevalenza", sp_prev, "e occorrenze", n_occ, "salvata con successo\n"), file = log_file, append = TRUE)
+        
+        # Pausa per evitare sovraccarichi
+        Sys.sleep(0.5)  # Pausa di mezzo secondo tra le generazioni delle specie
+        
+      }, error = function(e) {
+        # Log dell'errore
+        cat(paste("Errore durante la generazione della specie", species_num, "per prevalenza", sp_prev, "e occorrenze", n_occ, "\n"), file = log_file, append = TRUE)
+        cat(e$message, file = log_file, append = TRUE)
+      })
+      
+    } # fine ciclo per 5 specie virtuali
+    
+  } # fine ciclo per n_occ
+  
+} # fine ciclo per sp_prev
+
+
+
+
+#così mi crea 249 specie virtuali, nella creazione di una specie mi dà errore
