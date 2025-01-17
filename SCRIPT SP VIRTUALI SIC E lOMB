@@ -158,8 +158,6 @@ ggplot() +
 
 
 
-
-
 ############################# Virtual Species Generation ######################
 
 # Parameters for virtual species creation
@@ -179,20 +177,24 @@ dir.create(file.path(main_dir, sub_dir), showWarnings = FALSE)
 # Full path for output files
 output_dir <- file.path(main_dir, sub_dir)
 
+# Definizione del file di log per Lombardia
+log_file_sicilia <- file.path(output_dir, "generation_log_sicilia.txt")
+cat("Inizio della generazione delle specie virtuali per Sicilia\n", file = log_file_sicilia)
+
 
 # Loop through different prevalence values and occurrences for virtual species generation
 for (sp_prev in sp_prev_values) {
   for (n_occ in n_occ_values) {
     
     # Log the start of a new combination
-    cat(paste("Starting generation for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file, append = TRUE)
+    cat(paste("Starting generation for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file_sicilia, append = TRUE)
     
     # Generate 5 virtual species for each combination
     for (species_num in 1:5) {
       
       tryCatch({
         # Log the generation of the species
-        cat(paste("Generating species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file, append = TRUE)
+        cat(paste("Generating species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file_sicilia, append = TRUE)
         
         # Generate the virtual species with the specified parameters
         random.sp <- generateRandomSp(raster.stack = mydata_sicilia,
@@ -233,7 +235,7 @@ for (sp_prev in sp_prev_values) {
           .[, !(names(.) %in% drops)]
         
         # Add distance data to the occurrence points
-        initial_occ_bio_var <- d_raster %>%
+        initial_occ_bio_var <- d_rast_sicilia %>%
           terra::extract(., initial_occ_bio_var) %>%
           cbind(initial_occ_bio_var, .)
         
@@ -249,7 +251,7 @@ for (sp_prev in sp_prev_values) {
         names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
         
         # Add sampling probability values to the occurrence points
-        initial_occ_bio_var <- prob_raster %>%
+        initial_occ_bio_var <- prob_raster_sicilia %>%
           terra::extract(., initial_occ_bio_var) %>%
           cbind(initial_occ_bio_var, .)
         
@@ -272,7 +274,7 @@ for (sp_prev in sp_prev_values) {
         
         # Handle any missing (NA) values in the data frame
         if (any(is.na(df))) {
-          cat(paste("NA found in species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file, append = TRUE)
+          cat(paste("NA found in species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file_sicilia, append = TRUE)
           df[is.na(df)] <- 0  # Replace NA values with 0
         }
         
@@ -284,15 +286,15 @@ for (sp_prev in sp_prev_values) {
         write.csv(df, file_path, row.names = FALSE)
         
         # Log the successful save of the species data
-        cat(paste("Species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "saved successfully to", file_path, "\n"), file = log_file, append = TRUE)
+        cat(paste("Species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "saved successfully to", file_path, "\n"), file = log_file_sicilia, append = TRUE)
         
         # Pause for half a second to avoid overloading the system
         Sys.sleep(0.5)  # Half-second pause between species generations
         
       }, error = function(e) {
         # Log any error that occurs during the species generation process
-        cat(paste("Error during generation of species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file, append = TRUE)
-        cat(e$message, file = log_file, append = TRUE)
+        cat(paste("Error during generation of species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file_sicilia, append = TRUE)
+        cat(e$message, file = log_file_sicilia, append = TRUE)
       })
       
     } # End loop for generating 5 virtual species
@@ -374,7 +376,7 @@ sampling_prob_lombardia[sampling_prob_lombardia > 1] <- 1
 prob_raster_lombardia <- classify(d_lombardia, cbind(values(d_lombardia), sampling_prob_lombardia))
 
 
-############### Visualization ################
+############### Graphing ################
 
 # Check if 'aoi_lombardia' is of type 'sf' or 'sfc', then convert it to a SpatVector
 if (inherits(aoi_lombardia, "sf") || inherits(aoi_lombardia, "sfc")) {
@@ -460,43 +462,126 @@ dir.create(file.path(main_dir, sub_dir), showWarnings = FALSE)
 output_dir <- file.path(main_dir, sub_dir)
 
 # Log file for Lombardia species generation
-log_file <- file.path(output_dir, "generation_log_lombardia.txt")
-cat("Starting virtual species generation for Lombardia\n", file = log_file)
+log_file_lombardia <- file.path(output_dir, "generation_log_lombardia.txt")
+cat("Starting virtual species generation for Lombardia\n", file = log_file_lombardia)
 
-# Loop over combinations of species prevalence and occurrence values
+# Loop for the combinations
 for (sp_prev in sp_prev_values) {
   for (n_occ in n_occ_values) {
     
     # Log the start of a new combination
-    cat(paste("Starting generation for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file, append = TRUE)
+    cat(paste("Starting generation for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file_lombardia, append = TRUE)
     
     # Generate 5 virtual species for each combination
     for (species_num in 1:5) {
       
       tryCatch({
-        # Log the generation of the species
-        cat(paste("Generating species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file, append = TRUE)
+        # Log the creation of the species
+        cat(paste("Generating species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file_lombardia, append = TRUE)
         
-        # Generate a species based on the given prevalence and number of occurrences
-        species_data <- sp_generate(bioclim_stack = mydata_lombardia, presence_data = TRUE,
-                                    n_species = n_species, n_occurrences = n_occ, 
-                                    sample_prev = sp_prev, 
-                                    env_data = mydata_lombardia)
+        # Generate the virtual species
+        random.sp <- generateRandomSp(raster.stack = mydata_lombardia,
+                                      convert.to.PA = FALSE,
+                                      species.type = "multiplicative",
+                                      approach = "response",
+                                      relations = "gaussian",
+                                      realistic.sp = TRUE,
+                                      plot = FALSE)
         
-        # Save the species output to a file
-        species_file <- file.path(output_dir, paste0("species_", species_num, "_prev_", sp_prev, "_occ_", n_occ, ".rds"))
-        saveRDS(species_data, species_file)
+        # Prevalence of the species
+        new.pres <- convertToPA(random.sp,
+                                beta = "random",
+                                alpha = -0.05, plot = FALSE,
+                                species.prevalence = sp_prev)
         
-        # Log success for this species
-        cat(paste("Species", species_num, "saved successfully at", species_file, "\n"), file = log_file, append = TRUE)
+        # Random occurrences
+        presence.points <- sampleOccurrences(new.pres,
+                                             n = n_occ,
+                                             type = "presence only",
+                                             sample.prevalence = 0.9,
+                                             error.probability = 0,
+                                             detection.probability = 1,
+                                             correct.by.suitability = TRUE,
+                                             plot = FALSE)
+        
+        # Occurrences as points
+        initial_occ <- presence.points$sample.points %>%
+          as.data.frame() %>%
+          .[.$Real == 1 & .$Observed == 1, ] %>%
+          st_as_sf(., coords = c("x","y"))
+        
+        # Add bioclimatic values
+        drops <- c("Real", "Observed")
+        initial_occ_bio_var <- terra::extract(mydata_lombardia, initial_occ) %>%
+          cbind(., initial_occ) %>%
+          st_set_crs(4326) %>%
+          .[, !(names(.) %in% drops)]
+        
+        # Add distances
+        initial_occ_bio_var <- d_raster_lombardia %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rename the distance column
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+        
+        # Add suitability
+        initial_occ_bio_var <- random.sp$suitab.raster %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rename the suitability column
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+        
+        # Add the probability of being sampled for each point
+        initial_occ_bio_var <- prob_raster_lombardia %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rename the probability column
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+        
+        # Columns for unbiased and biased
+        initial_occ_bio_var <- initial_occ_bio_var %>%
+          mutate(
+            UNBIASED = TRUE, 
+            BIASED = probability == 1
+          )
+        
+        # Create a dataframe
+        df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+        
+        # Add variables and remove the 'geometry' column
+        df <- cbind(df, initial_occ_bio_var[, !(names(initial_occ_bio_var) %in% c("geometry"))])
+        df$geometry <- NULL
+        
+        # Handle any NA values in the dataframe
+        if (any(is.na(df))) {
+          cat(paste("NA values found in species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file_lombardia, append = TRUE)
+          df[is.na(df)] <- 0  # Replace all NA values with 0
+        }
+        
+        # Save as a CSV in the specified subdirectory
+        file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prev, 
+                            "_sample_prev_0.9_n_occ_", n_occ, ".csv")
+        
+        file_path <- file.path(output_dir, file_name)
+        write.csv(df, file_path, row.names = FALSE)
+        
+        # Log the success
+        cat(paste("Species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "successfully saved in", file_path, "\n"), file = log_file_lombardia, append = TRUE)
+        
+        # Pause to prevent overloading
+        Sys.sleep(0.5)  # Pause for half a second between species generation
         
       }, error = function(e) {
-        # Log any errors
-        cat(paste("Error generating species", species_num, ":", e$message, "\n"), file = log_file, append = TRUE)
+        # Log the error
+        cat(paste("Error during generation of species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file_lombardia, append = TRUE)
+        cat(e$message, file = log_file_lombardia, append = TRUE)
       })
-    }
-  }
-}
-
-# End the logging process
-cat("Virtual species generation completed for Lombardia\n", file = log_file, append = TRUE)
+      
+    } # End loop for 5 virtual species
+    
+  } # End loop for n_occ
+  
+} # End loop for sp_prev
