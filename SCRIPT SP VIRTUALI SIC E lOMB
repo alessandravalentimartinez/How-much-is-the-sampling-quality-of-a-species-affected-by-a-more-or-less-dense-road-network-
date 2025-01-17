@@ -9,6 +9,8 @@ library(geodata)        # For downloading WorldClim data and other geospatial da
 library(osmdata)        # For downloading OpenStreetMap data
 library(viridis)        # For using viridis color scales in plots
 library(rlang)          # For handling expressions and variable evaluation
+library(osmextract)     # For downloading and extract OpenStreetMap (OSM) data for specific geographic areas.
+
 
 # Set the working directory
 setwd("C:/tesi")
@@ -118,28 +120,45 @@ ggplot() +
   scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +
   scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))
 
-# Calculate sampling probabilities based on the distance values
-sampling_prob <- 1 - (((log(c * distances_sicilia[, 3])) / (log(max(c * distances_sicilia[, 3])))))
 
-# Ensure no probabilities exceed 1 and replace infinite values
-sampling_prob[sampling_prob == Inf] <- 1
-sampling_prob[sampling_prob > 1] <- 1
+# Convert the distance raster (d_rast_sicilia) to a dataframe, adding x and y coordinates
+distances_sicilia <- as.data.frame(d_rast_sicilia, xy = TRUE)
 
-# Add the sampling probabilities to the dataframe
+# Define the constant 'c' (as used in your code)
+c <- 1
+
+# Calculate the sampling probability based on the distance values
+sampling_prob <- 1 - (((log(c * distances_sicilia[, 3])) / (log(max(c * distances_sicilia[, 3])))))  # Calculate based on distance
+
+# Ensure that infinite values or those greater than 1 are handled correctly
+sampling_prob[sampling_prob == Inf] <- 1  # Replace infinite values with 1
+sampling_prob[sampling_prob > 1] <- 1    # Ensure no probabilities exceed 1
+
+# Add the calculated sampling probability to the dataframe
 distances_sicilia$sampling_prob <- sampling_prob
 
-# Create a plot for the sampling probability
+# Create a plot for the sampling probabilities using ggplot
 ggplot() +
+  # Add the probability raster as tiles (geom_tile)
   geom_tile(data = distances_sicilia, aes(x = x, y = y, fill = sampling_prob)) +
+  # Use the 'viridis' color palette for the fill
   scale_fill_viridis_c(option = "D", alpha = 1, begin = 0, end = 1) +
-  geom_sf(data = osm_sicilia_roads$geometry, color = "black", size = 0.5) +
-  theme_bw() +
-  theme_minimal() +
-  labs(title = "Sampling Probability", fill = "Probability") +
-  coord_sf() +
-  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) +
-  scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +
-  scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))
+  # Add OpenStreetMap (OSM) roads (ensure osm_sicilia_roads is properly defined)
+  geom_sf(data = osm_sicilia_roads$geometry, color = "black", size = 0.5) + 
+  theme_bw() +  # Use a white background for the plot
+  theme_minimal() +  # Apply a minimal theme
+  labs(title = "Sampling Probability", fill = "Probability") +  # Add plot title and legend label
+  coord_sf() +  # Set up the plot to use spatial coordinates
+  theme(
+    axis.title.x = element_blank(),  # Remove x-axis label
+    axis.title.y = element_blank()   # Remove y-axis label
+  ) +
+  scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +  # Format x-axis labels as degrees East
+  scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))    # Format y-axis labels as degrees North
+
+
+
+
 
 ############################# Virtual Species Generation ######################
 
