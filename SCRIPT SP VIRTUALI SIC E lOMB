@@ -1,0 +1,560 @@
+# Load necessary packages
+library(sf)             # For spatial data manipulation and shapefiles
+library(raster)         # For raster data manipulation
+library(virtualspecies) # For virtual species generation
+library(ggplot2)        # For plotting data using ggplot2
+library(dplyr)          # For data manipulation using dplyr functions
+library(terra)          # For spatial analysis (terra is a modern alternative to raster)
+library(geodata)        # For downloading WorldClim data and other geospatial datasets
+library(osmdata)        # For downloading OpenStreetMap data
+library(viridis)        # For using viridis color scales in plots
+library(rlang)          # For handling expressions and variable evaluation
+
+# Set the working directory
+setwd("C:/tesi")
+
+################ SICILIA #######################################
+
+# Load the shapefile of Sicily
+aoi_sicilia <- st_read("sicilia.shp") %>% .$geometry
+
+# Plot the region to visualize its geometry
+plot(aoi_sicilia)
+
+# Get the bounding box of the region
+sicilia_bb <- st_bbox(aoi_sicilia)
+
+# Define the type of road you want to extract from OpenStreetMap
+ht_secondary <- "secondary"
+
+# Download OpenStreetMap data for Sicily
+osm_sicilia <- oe_get("Sicilia", stringsAsFactors = FALSE, quiet = TRUE)
+osm_sicilia_roads <- osm_sicilia[osm_sicilia$highway %in% ht_secondary, ]
+
+# Load bioclimatic variables from WorldClim for Italy
+tmin <- worldclim_country("Ita", "tmin", path=tempdir(), res = 0.5, version = "2.1")
+tmax <- worldclim_country("Ita", "tmax", path=tempdir(), res = 0.5, version = "2.1")
+prec <- worldclim_country("Ita", "prec", path=tempdir(), res = 0.5, version = "2.1")
+
+# Extract only the first month of data for each bioclimatic variable
+tmin <- tmin$ITA_wc2.1_30s_tmin_1
+tmax <- tmax$ITA_wc2.1_30s_tmax_1
+prec <- prec$ITA_wc2.1_30s_prec_1
+
+# Create a raster stack with bioclimatic variables
+r_list <- c(tmin, tmax, prec)
+mydata_sicilia <- raster::stack(r_list)
+
+# Crop and mask the raster stack with the region of interest (Sicily)
+aoi_sp <- sf::as_Spatial(aoi_sicilia)
+mydata_sicilia <- mydata_sicilia %>% crop(., aoi_sp) %>% mask(., aoi_sp)
+
+# Rename the raster layers for clarity
+names(mydata_sicilia) <- c("Temperature Minimum", "Temperature Maximum", "Precipitation")
+
+# Plot the Temperature Minimum layer
+plot(mydata_sicilia$`Temperature.Minimum`, main = "Temperature Minimum", col = viridis::viridis(100))
+
+# Plot the Temperature Maximum layer
+plot(mydata_sicilia$`Temperature.Maximum`, main = "Temperature Maximum", col = viridis::viridis(100))
+
+# Plot the Precipitation layer
+plot(mydata_sicilia$Precipitation, main = "Precipitation", col = viridis::viridis(100))
+
+# Convert the OSM road data into a vector format (using terra package)
+roads_vect_sicilia <- terra::vect(osm_sicilia_roads$geometry)
+
+# Rasterize the road data based on the first layer of the bioclimatic raster stack
+raster_roads_sicilia <- as(mydata_sicilia[[1]], "SpatRaster")
+r_sicilia <- terra::rasterize(roads_vect_sicilia, raster_roads_sicilia)
+
+# Calculate the distance to roads in kilometers
+d_sicilia <- distance(r_sicilia, unit = "km")
+
+# Convert the distance raster to a regular raster object for further analysis
+d_rast_sicilia <- d_sicilia %>% raster()
+
+# Calculate sampling probability based on the distances to roads
+distances_sicilia <- d_rast_sicilia %>% as.data.frame()
+c <- 1
+sampling_prob <- 1 - (((log(c * distances_sicilia)) / (log(max(c * distances_sicilia))))) %>% as.data.frame()
+
+# Replace infinite values with 1 (maximum probability) and ensure all probabilities are <= 1
+sampling_prob[sampling_prob == Inf] <- 1
+sampling_prob[sampling_prob > 1] <- 1
+
+# Classify the probability raster based on the calculated probabilities
+prob_raster <- classify(d_sicilia, cbind(values(d_sicilia), sampling_prob))
+
+############### Graphing ###################################
+
+# Ensure the region geometry is in the correct format (SpatVector)
+if (inherits(aoi_sicilia, "sf") || inherits(aoi_sicilia, "sfc")) {
+  aoi_sicilia <- vect(aoi_sicilia)  # Convert to SpatVector format
+}
+
+# Mask the distance raster with the region of interest (Sicily)
+d_rast_sicilia <- mask(d_sicilia, aoi_sicilia)
+
+# Mask the probability raster with the region of interest (Sicily)
+prob_raster_sicilia <- mask(prob_raster, aoi_sicilia)
+
+# Convert the distance raster to a dataframe for plotting with ggplot2
+raster_df_dist_sicilia <- as.data.frame(d_rast_sicilia, xy = TRUE)
+
+# Identify the column name for distance values
+value_column_dist_sicilia <- names(raster_df_dist_sicilia)[3]
+
+# Create a plot for the distance from roads using ggplot2
+ggplot() +
+  geom_tile(data = raster_df_dist_sicilia, aes(x = x, y = y, fill = !!sym(value_column_dist_sicilia))) +
+  scale_fill_viridis_c(option = "D", alpha = 1, begin = 0, end = 1) +
+  geom_sf(data = osm_sicilia_roads$geometry, color = "black", size = 0.5) +
+  theme_bw() +
+  theme_minimal() +
+  labs(title = "Distance from Roads (km)", fill = "Distance (km)") +
+  coord_sf() +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) +
+  scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +
+  scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))
+
+# Calculate sampling probabilities based on the distance values
+sampling_prob <- 1 - (((log(c * distances_sicilia[, 3])) / (log(max(c * distances_sicilia[, 3])))))
+
+# Ensure no probabilities exceed 1 and replace infinite values
+sampling_prob[sampling_prob == Inf] <- 1
+sampling_prob[sampling_prob > 1] <- 1
+
+# Add the sampling probabilities to the dataframe
+distances_sicilia$sampling_prob <- sampling_prob
+
+# Create a plot for the sampling probability
+ggplot() +
+  geom_tile(data = distances_sicilia, aes(x = x, y = y, fill = sampling_prob)) +
+  scale_fill_viridis_c(option = "D", alpha = 1, begin = 0, end = 1) +
+  geom_sf(data = osm_sicilia_roads$geometry, color = "black", size = 0.5) +
+  theme_bw() +
+  theme_minimal() +
+  labs(title = "Sampling Probability", fill = "Probability") +
+  coord_sf() +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) +
+  scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +
+  scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))
+
+############################# Virtual Species Generation ######################
+
+# Parameters for virtual species creation
+sample_prev <- 0.9   # Define sample prevalence
+n_species <- 5       # Number of species to generate
+
+# Combinations of species prevalence and occurrences
+sp_prev_values <- seq(0.05, 0.50, by = 0.05)
+n_occ_values <- c(600, 700, 800, 900, 1000)
+
+# Create a directory structure to save the output data
+main_dir <- "C:/tesi/specie_virtuali"
+sub_dir <- "sicilia"
+dir.create(main_dir, showWarnings = FALSE)
+dir.create(file.path(main_dir, sub_dir), showWarnings = FALSE)
+
+# Full path for output files
+output_dir <- file.path(main_dir, sub_dir)
+
+
+# Loop through different prevalence values and occurrences for virtual species generation
+for (sp_prev in sp_prev_values) {
+  for (n_occ in n_occ_values) {
+    
+    # Log the start of a new combination
+    cat(paste("Starting generation for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file, append = TRUE)
+    
+    # Generate 5 virtual species for each combination
+    for (species_num in 1:5) {
+      
+      tryCatch({
+        # Log the generation of the species
+        cat(paste("Generating species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file, append = TRUE)
+        
+        # Generate the virtual species with the specified parameters
+        random.sp <- generateRandomSp(raster.stack = mydata_sicilia,
+                                      convert.to.PA = FALSE,  # Not converting to presence-absence yet
+                                      species.type = "multiplicative",  # Multiplicative model for species generation
+                                      approach = "response",  # Response-based approach for species distribution
+                                      relations = "gaussian",  # Use Gaussian relationship for the species distribution
+                                      realistic.sp = TRUE,  # Ensure realistic species distribution
+                                      plot = FALSE)  # Do not plot the species distribution
+        
+        # Convert the species to presence-absence (PA) based on the given prevalence
+        new.pres <- convertToPA(random.sp,
+                                beta = "random",  # Randomly determine the beta parameter
+                                alpha = -0.05, plot = FALSE,  # Adjust alpha for environmental response
+                                species.prevalence = sp_prev)  # Set the species prevalence
+        
+        # Sample random occurrences of the species
+        presence.points <- sampleOccurrences(new.pres,
+                                             n = n_occ,  # Number of occurrences to sample
+                                             type = "presence only",  # Only presence data
+                                             sample.prevalence = 0.9,  # Set the sample prevalence
+                                             error.probability = 0,  # No error probability
+                                             detection.probability = 1,  # 100% detection probability
+                                             correct.by.suitability = TRUE,  # Correct based on suitability
+                                             plot = FALSE)  # Do not plot the occurrences
+        
+        # Filter the sampled points to keep only the valid ones (Real = 1 and Observed = 1)
+        initial_occ <- presence.points$sample.points %>%
+          as.data.frame() %>%
+          .[.$Real == 1 & .$Observed == 1, ] %>%
+          st_as_sf(., coords = c("x","y"))
+        
+        # Add bioclimatic variables to the occurrence points
+        drops <- c("Real", "Observed")  # Columns to drop
+        initial_occ_bio_var <- terra::extract(mydata_sicilia, initial_occ) %>%
+          cbind(., initial_occ) %>%
+          st_set_crs(4326) %>%
+          .[, !(names(.) %in% drops)]
+        
+        # Add distance data to the occurrence points
+        initial_occ_bio_var <- d_raster %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rename the distance column
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+        
+        # Add suitability values to the occurrence points
+        initial_occ_bio_var <- random.sp$suitab.raster %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rename the suitability column
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+        
+        # Add sampling probability values to the occurrence points
+        initial_occ_bio_var <- prob_raster %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rename the probability column
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+        
+        # Add columns for unbiased and biased data
+        initial_occ_bio_var <- initial_occ_bio_var %>%
+          mutate(
+            UNBIASED = TRUE,  # Mark data as unbiased by default
+            BIASED = probability == 1  # Mark data as biased if probability equals 1
+          )
+        
+        # Create a data frame from the occurrence coordinates
+        df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+        
+        # Add bioclimatic variables and remove the 'geometry' column
+        df <- cbind(df, initial_occ_bio_var[, !(names(initial_occ_bio_var) %in% c("geometry"))])
+        df$geometry <- NULL
+        
+        # Handle any missing (NA) values in the data frame
+        if (any(is.na(df))) {
+          cat(paste("NA found in species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file, append = TRUE)
+          df[is.na(df)] <- 0  # Replace NA values with 0
+        }
+        
+        # Save the occurrence data as a CSV file
+        file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prev, 
+                            "_sample_prev_0.9_n_occ_", n_occ, ".csv")
+        
+        file_path <- file.path(output_dir, file_name)
+        write.csv(df, file_path, row.names = FALSE)
+        
+        # Log the successful save of the species data
+        cat(paste("Species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "saved successfully to", file_path, "\n"), file = log_file, append = TRUE)
+        
+        # Pause for half a second to avoid overloading the system
+        Sys.sleep(0.5)  # Half-second pause between species generations
+        
+      }, error = function(e) {
+        # Log any error that occurs during the species generation process
+        cat(paste("Error during generation of species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file, append = TRUE)
+        cat(e$message, file = log_file, append = TRUE)
+      })
+      
+    } # End loop for generating 5 virtual species
+    
+  } # End loop for different occurrence values
+  
+} # End loop for different prevalence values
+
+
+
+
+
+
+################ LOMBARDIA #######################################
+
+# Load the shapefile of Lombardy
+aoi_lombardia <- st_read("lombardia.shp") %>% .$geometry
+
+# Plot the region to visualize its geometry
+plot(aoi_lombardia)
+
+# Get the bounding box of the region
+lombardia_bb <- st_bbox(aoi_lombardia)
+
+# Define the type of road you want to extract from OpenStreetMap
+ht_secondary <- "secondary"
+
+# Download OpenStreetMap data for Lombardy
+osm_lombardia <- oe_get("Lombardia", stringsAsFactors = FALSE, quiet = TRUE)
+osm_lombardia_roads <- osm_lombardia[osm_lombardia$highway %in% ht_secondary, ]
+
+# Load bioclimatic variables from WorldClim for Italy
+tmin <- worldclim_country("Ita", "tmin", path=tempdir(), res = 0.5, version = "2.1")
+tmax <- worldclim_country("Ita", "tmax", path=tempdir(), res = 0.5, version = "2.1")
+prec <- worldclim_country("Ita", "prec", path=tempdir(), res = 0.5, version = "2.1")
+
+# Extract only the first month of data for each bioclimatic variable
+tmin <- tmin$ITA_wc2.1_30s_tmin_1
+tmax <- tmax$ITA_wc2.1_30s_tmax_1
+prec <- prec$ITA_wc2.1_30s_prec_1
+
+# Create a raster stack with bioclimatic variables
+r_list <- c(tmin, tmax, prec)
+mydata_lombardia <- raster::stack(r_list)
+
+# Crop and mask the raster stack with the region of interest (Lombardy)
+aoi_sp <- sf::as_Spatial(aoi_lombardia)
+mydata_lombardia <- mydata_lombardia %>% crop(., aoi_sp) %>% mask(., aoi_sp)
+
+# Rename the raster layers for clarity
+names(mydata_lombardia) <- c("Temperature Minimum", "Temperature Maximum", "Precipitation")
+
+# Plot the Temperature Minimum layer
+plot(mydata_lombardia$`Temperature.Minimum`, main = "Temperature Minimum", col = viridis::viridis(100))
+
+# Plot the Temperature Maximum layer
+plot(mydata_lombardia$`Temperature.Maximum`, main = "Temperature Maximum", col = viridis::viridis(100))
+
+# Plot the Precipitation layer
+plot(mydata_lombardia$Precipitation, main = "Precipitation", col = viridis::viridis(100))
+
+# Convert the OSM road data into a vector format (using terra package)
+roads_vect_lombardia <- terra::vect(osm_lombardia_roads$geometry)
+
+# Rasterize the road data based on the first layer of the bioclimatic raster stack
+raster_roads_lombardia <- as(mydata_lombardia[[1]], "SpatRaster")
+r_lombardia <- terra::rasterize(roads_vect_lombardia, raster_roads_lombardia)
+
+# Calculate the distance to roads in kilometers
+d_lombardia <- distance(r_lombardia, unit = "km")
+
+# Convert the distance raster to a regular raster object for further analysis
+d_rast_lombardia <- d_lombardia %>% raster()
+
+# Calculate sampling probability based on the distances to roads
+distances_lombardia <- d_rast_lombardia %>% as.data.frame()
+c <- 1
+sampling_prob <- 1 - (((log(c * distances_lombardia)) / (log(max(c * distances_lombardia))))) %>% as.data.frame()
+
+# Replace infinite values with 1 (maximum probability) and ensure all probabilities are <= 1
+sampling_prob[sampling_prob == Inf] <- 1
+sampling_prob[sampling_prob > 1] <- 1
+
+# Classify the probability raster based on the calculated probabilities
+prob_raster <- classify(d_lombardia, cbind(values(d_lombardia), sampling_prob))
+
+############### Graphing ###################################
+
+# Ensure the region geometry is in the correct format (SpatVector)
+if (inherits(aoi_lombardia, "sf") || inherits(aoi_lombardia, "sfc")) {
+  aoi_lombardia <- vect(aoi_lombardia)  # Convert to SpatVector format
+}
+
+# Mask the distance raster with the region of interest (Lombardy)
+d_rast_lombardia <- mask(d_lombardia, aoi_lombardia)
+
+# Mask the probability raster with the region of interest (Lombardy)
+prob_raster_lombardia <- mask(prob_raster, aoi_lombardia)
+
+# Convert the distance raster to a dataframe for plotting with ggplot2
+raster_df_dist_lombardia <- as.data.frame(d_rast_lombardia, xy = TRUE)
+
+# Identify the column name for distance values
+value_column_dist_lombardia <- names(raster_df_dist_lombardia)[3]
+
+# Create a plot for the distance from roads using ggplot2
+ggplot() +
+  geom_tile(data = raster_df_dist_lombardia, aes(x = x, y = y, fill = !!sym(value_column_dist_lombardia))) +
+  scale_fill_viridis_c(option = "D", alpha = 1, begin = 0, end = 1) +
+  geom_sf(data = osm_lombardia_roads$geometry, color = "black", size = 0.5) +
+  theme_bw() +
+  theme_minimal() +
+  labs(title = "Distance from Roads (km)", fill = "Distance (km)") +
+  coord_sf() +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) +
+  scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +
+  scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))
+
+# Calculate sampling probabilities based on the distance values
+sampling_prob <- 1 - (((log(c * distances_lombardia[, 3])) / (log(max(c * distances_lombardia[, 3])))))
+
+# Ensure no probabilities exceed 1 and replace infinite values
+sampling_prob[sampling_prob == Inf] <- 1
+sampling_prob[sampling_prob > 1] <- 1
+
+# Add the sampling probabilities to the dataframe
+distances_lombardia$sampling_prob <- sampling_prob
+
+# Create a plot for the sampling probability
+ggplot() +
+  geom_tile(data = distances_lombardia, aes(x = x, y = y, fill = sampling_prob)) +
+  scale_fill_viridis_c(option = "D", alpha = 1, begin = 0, end = 1) +
+  geom_sf(data = osm_lombardia_roads$geometry, color = "black", size = 0.5) +
+  theme_bw() +
+  theme_minimal() +
+  labs(title = "Sampling Probability", fill = "Probability") +
+  coord_sf() +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) +
+  scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +
+  scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))
+
+############################# Virtual Species Generation ######################
+
+# Parameters for virtual species creation
+sample_prev <- 0.9   # Define sample prevalence
+n_species <- 5       # Number of species to generate
+
+# Combinations of species prevalence and occurrences
+sp_prev_values <- seq(0.05, 0.50, by = 0.05)
+n_occ_values <- c(600, 700, 800, 900, 1000)
+
+# Create a directory structure to save the output data
+main_dir <- "C:/tesi/specie_virtuali"
+sub_dir <- "lombardia"
+dir.create(main_dir, showWarnings = FALSE)
+dir.create(file.path(main_dir, sub_dir), showWarnings = FALSE)
+
+# Full path for output files
+output_dir <- file.path(main_dir, sub_dir)
+
+
+# Loop through different prevalence values and occurrences for virtual species generation
+for (sp_prev in sp_prev_values) {
+  for (n_occ in n_occ_values) {
+    
+    # Log the start of a new combination
+    cat(paste("Starting generation for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file, append = TRUE)
+    
+    # Generate 5 virtual species for each combination
+    for (species_num in 1:5) {
+      
+      tryCatch({
+        # Log the generation of the species
+        cat(paste("Generating species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file, append = TRUE)
+        
+        # Generate the virtual species with the specified parameters
+        random.sp <- generateRandomSp(raster.stack = mydata_lombardia,  # Using Lombardy raster stack
+                                      convert.to.PA = FALSE,  # Not converting to presence-absence yet
+                                      species.type = "multiplicative",  # Multiplicative model for species generation
+                                      approach = "response",  # Response-based approach for species distribution
+                                      relations = "gaussian",  # Use Gaussian relationship for the species distribution
+                                      realistic.sp = TRUE,  # Ensure realistic species distribution
+                                      plot = FALSE)  # Do not plot the species distribution
+        
+        # Convert the species to presence-absence (PA) based on the given prevalence
+        new.pres <- convertToPA(random.sp,
+                                beta = "random",  # Randomly determine the beta parameter
+                                alpha = -0.05, plot = FALSE,  # Adjust alpha for environmental response
+                                species.prevalence = sp_prev)  # Set the species prevalence
+        
+        # Sample random occurrences of the species
+        presence.points <- sampleOccurrences(new.pres,
+                                             n = n_occ,  # Number of occurrences to sample
+                                             type = "presence only",  # Only presence data
+                                             sample.prevalence = 0.9,  # Set the sample prevalence
+                                             error.probability = 0,  # No error probability
+                                             detection.probability = 1,  # 100% detection probability
+                                             correct.by.suitability = TRUE,  # Correct based on suitability
+                                             plot = FALSE)  # Do not plot the occurrences
+        
+        # Filter the sampled points to keep only the valid ones (Real = 1 and Observed = 1)
+        initial_occ <- presence.points$sample.points %>%
+          as.data.frame() %>%
+          .[.$Real == 1 & .$Observed == 1, ] %>%
+          st_as_sf(., coords = c("x","y"))
+        
+        # Add bioclimatic variables to the occurrence points
+        drops <- c("Real", "Observed")  # Columns to drop
+        initial_occ_bio_var <- terra::extract(mydata_lombardia, initial_occ) %>%
+          cbind(., initial_occ) %>%
+          st_set_crs(4326) %>%
+          .[, !(names(.) %in% drops)]
+        
+        # Add distance data to the occurrence points
+        initial_occ_bio_var <- d_raster_lombardia %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rename the distance column
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+        
+        # Add suitability values to the occurrence points
+        initial_occ_bio_var <- random.sp$suitab.raster %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rename the suitability column
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+        
+        # Add sampling probability values to the occurrence points
+        initial_occ_bio_var <- prob_raster_lombardia %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rename the probability column
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+        
+        # Add columns for unbiased and biased data
+        initial_occ_bio_var <- initial_occ_bio_var %>%
+          mutate(
+            UNBIASED = TRUE,  # Mark data as unbiased by default
+            BIASED = probability == 1  # Mark data as biased if probability equals 1
+          )
+        
+        # Create a data frame from the occurrence coordinates
+        df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+        
+        # Add bioclimatic variables and remove the 'geometry' column
+        df <- cbind(df, initial_occ_bio_var[, !(names(initial_occ_bio_var) %in% c("geometry"))])
+        df$geometry <- NULL
+        
+        # Handle any missing (NA) values in the data frame
+        if (any(is.na(df))) {
+          cat(paste("NA found in species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file, append = TRUE)
+          df[is.na(df)] <- 0  # Replace NA values with 0
+        }
+        
+        # Save the occurrence data as a CSV file
+        file_name <- paste0("species_", species_num, "_sp_prevalence_", sp_prev, 
+                            "_sample_prev_0.9_n_occ_", n_occ, ".csv")
+        
+        file_path <- file.path(output_dir, file_name)
+        write.csv(df, file_path, row.names = FALSE)
+        
+        # Log the successful save of the species data
+        cat(paste("Species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "saved successfully to", file_path, "\n"), file = log_file, append = TRUE)
+        
+        # Pause for half a second to avoid overloading the system
+        Sys.sleep(0.5)  # Half-second pause between species generations
+        
+      }, error = function(e) {
+        # Log any error that occurs during the species generation process
+        cat(paste("Error during generation of species", species_num, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file, append = TRUE)
+        cat(e$message, file = log_file, append = TRUE)
+      })
+      
+    } # End loop for generating 5 virtual species
+    
+  } # End loop for different occurrence values
+  
+} # End loop for different prevalence values
+
+
+
