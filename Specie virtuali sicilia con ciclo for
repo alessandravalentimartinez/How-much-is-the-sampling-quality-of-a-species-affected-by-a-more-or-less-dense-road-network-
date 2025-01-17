@@ -13,6 +13,11 @@ library(osmextract)
 # Imposta la working directory
 setwd("C:/tesi")
 
+
+
+
+################ SICILIA #######################################
+
 # Carica il shapefile
 aoi_sicilia <- st_read("sicilia.shp") %>% .$geometry
 
@@ -49,6 +54,16 @@ mydata_sicilia <- mydata_sicilia %>% crop(., aoi_sp) %>% mask(., aoi_sp)
 
 # Rinomina i layer nel raster stack
 names(mydata_sicilia) <- c("Temperature Minimum", "Temperature Maximum", "Precipitation")
+
+
+# Plot per tmin (Temperature Minimum)
+plot(mydata_sicilia$`Temperature.Minimum`, main = "Temperature Minimum", col = viridis::viridis(100))
+
+# Plot per tmax (Temperature Maximum)
+plot(mydata_sicilia$`Temperature.Maximum`, main = "Temperature Maximum", col = viridis::viridis(100))
+
+# Plot per prec (Precipitation)
+plot(mydata_sicilia$Precipitation, main = "Precipitation", col = viridis::viridis(100))
 
 # Crea il vettore delle strade OSM
 roads_vect <- terra::vect(osm_sicilia_roads$geometry)
@@ -214,3 +229,6 @@ for (sp_prev in sp_prev_values) {
 
 
 #così mi crea 249 specie virtuali, nella creazione di una specie mi dà errore
+
+
+############################# LOMBARDIA ##########################
