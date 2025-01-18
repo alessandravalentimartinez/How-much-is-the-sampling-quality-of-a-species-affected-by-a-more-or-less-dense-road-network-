@@ -269,5 +269,186 @@ ggplot() +
   scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))    # Format y-axis labels as degrees North
 
 
+################ LOMBARDIA #######################################
+
+# Load the shapefile of Lombardy
+aoi_lombardia <- st_read("lombardia.shp") %>% .$geometry
+
+# Plot the region to visualize its geometry
+plot(aoi_lombardia)
+
+# Get the bounding box of the region
+lombardia_bb <- st_bbox(aoi_lombardia)
+
+# Define the type of road you want to extract from OpenStreetMap
+ht_secondary <- "secondary"
+
+# Download OpenStreetMap data for Lombardy
+osm_lombardia <- oe_get("Lombardia", stringsAsFactors = FALSE, quiet = TRUE)
+osm_lombardia_roads <- osm_lombardia[osm_lombardia$highway %in% ht_secondary, ]
+
+# Load bioclimatic variables from WorldClim for Italy
+tmin <- worldclim_country("Ita", "tmin", path=tempdir(), res = 0.5, version = "2.1")
+tmax <- worldclim_country("Ita", "tmax", path=tempdir(), res = 0.5, version = "2.1")
+prec <- worldclim_country("Ita", "prec", path=tempdir(), res = 0.5, version = "2.1")
+
+# Extract only the first month of data for each bioclimatic variable
+tmin <- tmin$ITA_wc2.1_30s_tmin_1
+tmax <- tmax$ITA_wc2.1_30s_tmax_1
+prec <- prec$ITA_wc2.1_30s_prec_1
+
+# Create a raster stack with bioclimatic variables
+r_list <- c(tmin, tmax, prec)
+mydata_lombardia <- raster::stack(r_list)
+
+# Crop and mask the raster stack with the region of interest (Lombardy)
+aoi_sp <- sf::as_Spatial(aoi_lombardia)
+mydata_lombardia <- mydata_lombardia %>% crop(., aoi_sp) %>% mask(., aoi_sp)
+
+# Rename the raster layers for clarity
+names(mydata_lombardia) <- c("Temperature Minimum", "Temperature Maximum", "Precipitation")
+
+# Convert the OSM road data into a vector format (using terra package)
+roads_vect_lombardia <- terra::vect(osm_lombardia_roads$geometry)
+
+# Rasterize the road data based on the first layer of the bioclimatic raster stack
+raster_roads_lombardia <- as(mydata_lombardia[[1]], "SpatRaster")
+r_lombardia <- terra::rasterize(roads_vect_lombardia, raster_roads_lombardia)
+
+# Calculate the distance to roads in kilometers
+d_lombardia <- distance(r_lombardia, unit = "km")
+
+# Convert the distance raster to a regular raster object for further analysis
+d_rast_lombardia <- d_lombardia %>% raster()
+
+# Calculate sampling probability based on the distances to roads
+distances_lombardia <- d_rast_lombardia %>% as.data.frame()
+c <- 1
+sampling_prob <- 1 - (((log(c * distances_lombardia)) / (log(max(c * distances_lombardia))))) %>% as.data.frame()
+
+# Replace infinite values with 1 (maximum probability) and ensure all probabilities are <= 1
+sampling_prob[sampling_prob == Inf] <- 1
+sampling_prob[sampling_prob > 1] <- 1
+
+# Classify the probability raster based on the calculated probabilities
+prob_raster <- classify(d_lombardia, cbind(values(d_lombardia), sampling_prob))
+
+
+############################# Virtual Species Generation ####################### 
+
+# Parametri generali
+sample_prev <- 0.9   # Prevalenza del campionamento
+n_species <- 5       # Numero di specie da generare
+sp_prev_values <- seq(0.05, 0.50, by = 0.05)  # Prevalenze delle specie
+n_occ_values <- c(600, 700, 800, 900, 1000)   # Valori per numero di occorrenze
+
+# Path completo della cartella di salvataggio
+output_dir <- "C:/tesi/specie virtuali/LOMBARDIA"
+
+# Verifica se la cartella esiste già, altrimenti creala
+if (!dir.exists(output_dir)) {
+  # Prova a creare la cartella (con tutte le cartelle necessarie)
+  dir.create(output_dir, recursive = TRUE)
+  cat("La cartella è stata creata con successo!\n")
+} else {
+  cat("La cartella esiste già.\n")
+}
+
+# Ciclo per ogni combinazione di prevalenza e numero di occorrenze
+for (sp_prevalence in sp_prev_values) {
+  for (n_occ in n_occ_values) {
+    for (species_num in 1:n_species) {
+      
+      # Generazione della specie virtuale: suitability
+      random.sp <- generateRandomSp(raster.stack = mydata_lombardia,
+                                    convert.to.PA = FALSE,
+                                    species.type = "multiplicative",
+                                    approach = "response",
+                                    relations = "gaussian",
+                                    realistic.sp = TRUE,
+                                    plot = FALSE)
+      
+      # Conversione in presence/absence
+      new.pres <- convertToPA(random.sp,
+                              beta = "random",
+                              alpha = -0.05,
+                              plot = FALSE,
+                              species.prevalence = sp_prevalence)
+      
+      # Campionamento delle occorrenze
+      presence.points <- sampleOccurrences(new.pres,
+                                           n = n_occ,
+                                           type = "presence only",
+                                           sample.prevalence = sample_prev,
+                                           error.probability = 0,
+                                           detection.probability = 1,
+                                           correct.by.suitability = TRUE,
+                                           plot = FALSE)
+      
+      # Occorrenze come punti
+      initial_occ <- presence.points$sample.points %>%
+        as.data.frame() %>%
+        .[.$Real == 1 & .$Observed == 1, ] %>%
+        st_as_sf(coords = c("x", "y"))
+      
+      # Aggiunta delle variabili bioclimatiche
+      drops <- c("Real", "Observed")
+      initial_occ_bio_var <- terra::extract(mydata_lombardia, initial_occ) %>%
+        cbind(., initial_occ) %>%
+        st_set_crs(4326) %>%
+        .[, !(names(.) %in% drops)]
+      
+      # Aggiunta delle distanze
+      initial_occ_bio_var <- d_rast_lombardia %>%
+        terra::extract(., initial_occ_bio_var) %>%
+        cbind(initial_occ_bio_var, .)
+      
+      # Controllo e correzione della colonna "distance"
+      if ("." %in% names(initial_occ_bio_var)) {
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+      }
+      
+      # Assicurati che "distance" sia numerica
+      initial_occ_bio_var$distance <- as.numeric(initial_occ_bio_var$distance)
+      
+      # Gestisci eventuali valori NA o non numerici
+      if (any(is.na(initial_occ_bio_var$distance))) {
+        stop("La colonna 'distance' contiene valori non numerici o NA.")
+      }
+      
+      # Aggiunta delle colonne UNBIASED e BIASED
+      initial_occ_bio_var <- initial_occ_bio_var %>%
+        mutate(
+          UNBIASED = distance > 0,
+          BIASED = distance == 0
+        )
+      
+      # Aggiunta della suitability
+      initial_occ_bio_var <- random.sp$suitab.raster %>%
+        terra::extract(., initial_occ_bio_var) %>%
+        cbind(initial_occ_bio_var, .)
+      names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+      
+      # Aggiunta della probabilità di essere campionati
+      initial_occ_bio_var <- prob_raster %>%
+        terra::extract(., initial_occ_bio_var) %>%
+        cbind(initial_occ_bio_var, .)
+      names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+      
+      # Dataframe finale
+      df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+      df <- cbind(df, initial_occ_bio_var[, !(names(initial_occ_bio_var) %in% c("geometry"))])
+      df$geometry <- NULL
+      
+      # Salvataggio del file CSV
+      file_name <- paste0("species_", species_num, 
+                          "_sp_prevalence_", sp_prevalence, 
+                          "_sample_prev_", sample_prev, 
+                          "_n_occ_", n_occ, ".csv")
+      write.csv(df, file.path(output_dir, file_name), row.names = FALSE)
+    }
+  }
+}
+
 
 
