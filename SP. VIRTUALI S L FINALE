@@ -10,7 +10,7 @@ library(osmdata)        # For downloading OpenStreetMap data
 library(viridis)        # For using viridis color scales in plots
 library(rlang)          # For handling expressions and variable evaluation
 library(osmextract)     # For downloading and extract OpenStreetMap (OSM) data for specific geographic areas.
-
+library(ade4)
 
 
 # Set the working directory
