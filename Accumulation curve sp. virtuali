@@ -1,0 +1,162 @@
+
+#### Il pacchetto adehabitatMA (utilizzato implicitamente da altre librerie come ecospat) richiede almeno 5 occorrenze per calcolare un home range e quindi una densità climatica. 
+#### L'accumulo inizia da un minimo di 5 occorrenze, poiché sotto tale soglia il calcolo della griglia fallisce.
+
+
+# Caricamento delle librerie necessarie
+library(ecospat)
+library(raster)
+library(terra)
+library(sp)
+library(viridis)
+library(sf)
+library(markdown)
+library(rmarkdown)
+
+# Imposta la directory di lavoro
+setwd("C:/tesi")
+
+
+
+# Caricamento del dataset
+data <- read.csv("C:/tesi/Specie virtuali/SICILIA/species_1_sp_prevalence_0.1_sample_prev_0.9_n_occ_600.csv")
+
+# Separazione delle occorrenze biased e unbiased
+biased_data <- data[data$BIASED == TRUE, ]
+unbiased_data <- data[data$UNBIASED == TRUE, ]
+
+# PCA per estrarre le componenti principali delle variabili ambientali
+library(ade4)
+
+# Combinazione dei dati per la PCA
+all_env <- rbind(biased_data[, c("Temperature.Minimum", "Temperature.Maximum", "Precipitation")],
+                 unbiased_data[, c("Temperature.Minimum", "Temperature.Maximum", "Precipitation")])
+
+pca_clim <- dudi.pca(as.data.frame(all_env), center = TRUE, scale = TRUE, scannf = FALSE, nf = 2)
+
+# Funzione per calcolare D e I
+calcola_overlap <- function(biased_scores, unbiased_scores, global_scores) {
+  library(ecospat)
+  
+  # Creazione delle griglie di densità
+  biased_grid <- ecospat.grid.clim.dyn(global_scores, biased_scores, biased_scores)
+  unbiased_grid <- ecospat.grid.clim.dyn(global_scores, unbiased_scores, unbiased_scores)
+  
+  # Calcolo degli indici
+  overlap <- ecospat.niche.overlap(biased_grid, unbiased_grid, cor = TRUE)
+  list(D = overlap$D, I = overlap$I)
+}
+
+# Costruzione della curva di accumulazione
+num_occurrences <- seq(1, nrow(data), by = 1)
+risultati <- data.frame(Num.Occurrences = numeric(), D = numeric(), I = numeric())
+
+# Costruzione della curva di accumulazione
+num_occurrences <- seq(5, nrow(data), by = 1) # Inizia da 5 occorrenze
+risultati <- data.frame(Num.Occurrences = numeric(), D = numeric(), I = numeric())
+
+for (n in num_occurrences) {
+  # Selezione incrementale delle occorrenze
+  biased_subset <- biased_data[1:min(n, nrow(biased_data)), ]
+  unbiased_subset <- unbiased_data[1:min(n, nrow(unbiased_data)), ]
+  
+  # Controlla che ci siano almeno 5 occorrenze per ogni subset
+  if (nrow(biased_subset) >= 5 && nrow(unbiased_subset) >= 5) {
+    # PCA scores
+    biased_scores <- suprow(pca_clim, biased_subset[, c("Temperature.Minimum", "Temperature.Maximum", "Precipitation")])$li
+    unbiased_scores <- suprow(pca_clim, unbiased_subset[, c("Temperature.Minimum", "Temperature.Maximum", "Precipitation")])$li
+    global_scores <- pca_clim$li
+    
+    # Calcolo D e I
+    overlap <- calcola_overlap(biased_scores, unbiased_scores, global_scores)
+    
+    # Salvataggio dei risultati
+    risultati <- rbind(risultati, data.frame(Num.Occurrences = n, D = overlap$D, I = overlap$I))
+  }
+}
+
+# Salvataggio in un file CSV
+write.csv(risultati, "species_1_sp_prevalence_0.1_sample_prev_0.9_n_occ_600_accumulation_curve.csv", row.names = FALSE)
+
+# Visualizzazione dei risultati
+head(risultati)
+
+
+
+################################################# 
+#script con ciclo for per tutte le specie
+
+# Librerie necessarie
+library(ade4)
+library(ecospat)
+
+# Percorso della cartella principale
+main_dir <- "C:/tesi/Specie virtuali/SICILIA"
+output_dir <- file.path(main_dir, "Accumulation curve")
+
+# Creazione della cartella di output se non esiste
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Funzione per calcolare D e I
+calcola_overlap <- function(biased_scores, unbiased_scores, global_scores) {
+  # Creazione delle griglie di densità
+  biased_grid <- ecospat.grid.clim.dyn(global_scores, biased_scores, biased_scores)
+  unbiased_grid <- ecospat.grid.clim.dyn(global_scores, unbiased_scores, unbiased_scores)
+  
+  # Calcolo degli indici
+  overlap <- ecospat.niche.overlap(biased_grid, unbiased_grid, cor = TRUE)
+  list(D = overlap$D, I = overlap$I)
+}
+
+# Funzione per processare un singolo file
+process_file <- function(file_path) {
+  # Caricamento del dataset
+  data <- read.csv(file_path)
+  
+  # Separazione delle occorrenze biased e unbiased
+  biased_data <- data[data$BIASED == TRUE, ]
+  unbiased_data <- data[data$UNBIASED == TRUE, ]
+  
+  # PCA per estrarre le componenti principali delle variabili ambientali
+  all_env <- rbind(biased_data[, c("Temperature.Minimum", "Temperature.Maximum", "Precipitation")],
+                   unbiased_data[, c("Temperature.Minimum", "Temperature.Maximum", "Precipitation")])
+  
+  pca_clim <- dudi.pca(as.data.frame(all_env), center = TRUE, scale = TRUE, scannf = FALSE, nf = 2)
+  
+  # Costruzione della curva di accumulazione
+  num_occurrences <- seq(5, nrow(data), by = 1)
+  risultati <- data.frame(Num.Occurrences = numeric(), D = numeric(), I = numeric())
+  
+  for (n in num_occurrences) {
+    # Selezione incrementale delle occorrenze
+    biased_subset <- biased_data[1:min(n, nrow(biased_data)), ]
+    unbiased_subset <- unbiased_data[1:min(n, nrow(unbiased_data)), ]
+    
+    # PCA scores
+    biased_scores <- suprow(pca_clim, biased_subset[, c("Temperature.Minimum", "Temperature.Maximum", "Precipitation")])$li
+    unbiased_scores <- suprow(pca_clim, unbiased_subset[, c("Temperature.Minimum", "Temperature.Maximum", "Precipitation")])$li
+    global_scores <- pca_clim$li
+    
+    # Calcolo D e I
+    overlap <- calcola_overlap(biased_scores, unbiased_scores, global_scores)
+    
+    # Salvataggio dei risultati
+    risultati <- rbind(risultati, data.frame(Num.Occurrences = n, D = overlap$D, I = overlap$I))
+  }
+  
+  # Salvataggio in un file CSV
+  file_name <- basename(file_path)
+  output_file <- file.path(output_dir, sub(".csv$", "_accumulation_curve.csv", file_name))
+  write.csv(risultati, output_file, row.names = FALSE)
+  
+  cat("Curva di accumulazione salvata per:", file_name, "\n")
+}
+
+# Elaborazione di tutti i file nella cartella
+files <- list.files(main_dir, pattern = "^species_\\d+_sp_prevalence_.*\\.csv$", full.names = TRUE)
+
+for (file_path in files) {
+  process_file(file_path)
+}
+
+
