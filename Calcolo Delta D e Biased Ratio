@@ -310,6 +310,30 @@ write.csv(final_combined_results, output_file, row.names = FALSE)
 cat("Risultati unificati salvati in:", output_file, "\n")
 
 
+##################################### GRAFICO 
+
+library(ggplot2)
+library(viridis)
+library(readr)
+
+# Carica i dati dal file CSV creato precedentemente
+file_path <- "C:/tesi/Specie virtuali/SICILIA/results/all_species_combined_results.csv"
+data <- read.csv(file_path)
+
+# Creazione del grafico con linea di tendenza rossa
+ggplot(data, aes(x = BiasedRatio, y = DeltaD, color = SpeciesPrevalence)) +
+  geom_point(size = 3) +  # Aggiungi i punti
+  scale_color_viridis(option = "D") +  # Utilizza la gradazione di colore viridis per il `SpeciesPrevalence`
+  geom_smooth(method = "lm", se = FALSE, color = "red", size = 1) +  # Aggiungi linea di tendenza rossa
+  labs(
+    title = "Biased Ratio vs DeltaD",
+    x = "Biased Ratio",
+    y = "DeltaD",
+    color = "Species Prevalence"
+  ) +
+  theme_minimal()  # Tema minimale per il grafico
+
+
 
 
 
