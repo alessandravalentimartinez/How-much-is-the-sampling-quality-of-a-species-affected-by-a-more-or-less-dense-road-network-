@@ -320,11 +320,11 @@ library(readr)
 file_path <- "C:/tesi/Specie virtuali/SICILIA/results/all_species_combined_results.csv"
 data <- read.csv(file_path)
 
-# Creazione del grafico con linea di tendenza rossa
+# Creazione del grafico con linea di tendenza rossa e correzione per il warning
 ggplot(data, aes(x = BiasedRatio, y = DeltaD, color = SpeciesPrevalence)) +
   geom_point(size = 3) +  # Aggiungi i punti
   scale_color_viridis(option = "D") +  # Utilizza la gradazione di colore viridis per il `SpeciesPrevalence`
-  geom_smooth(method = "lm", se = FALSE, color = "red", size = 1) +  # Aggiungi linea di tendenza rossa
+  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 1) +  # Aggiungi linea di tendenza rossa con linewidth
   labs(
     title = "Biased Ratio vs DeltaD",
     x = "Biased Ratio",
@@ -332,6 +332,8 @@ ggplot(data, aes(x = BiasedRatio, y = DeltaD, color = SpeciesPrevalence)) +
     color = "Species Prevalence"
   ) +
   theme_minimal()  # Tema minimale per il grafico
+
+
 
 
 
