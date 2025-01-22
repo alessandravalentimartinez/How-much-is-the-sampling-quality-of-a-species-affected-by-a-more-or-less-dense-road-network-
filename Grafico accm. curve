@@ -1,3 +1,19 @@
+#1. Schöner’s D Index
+#Descrizione: Misura la sovrapposizione basata sulle differenze nella densità di occorrenza di una specie in diverse condizioni ambientali o spaziali.
+#Intervallo: Va da 0 a 1.
+#0: Nessuna sovrapposizione tra le nicchie.
+#1: Sovrapposizione totale tra le nicchie.
+
+
+#2. Indice di Hellinger (I)
+#Descrizione: Misura la somiglianza tra le distribuzioni di probabilità delle due specie nello spazio delle nicchie, utilizzando un approccio basato sulla distanza di Hellinger.
+#Intervallo: Anche questo va da 0 a 1.
+#0: Nessuna somiglianza tra le distribuzioni.
+#1: Distribuzioni identiche.
+
+
+#D: Misura quanto sono diverse le nicchie in termini di distribuzione globale delle densità. Più robusto e adatto per confronti generali.
+#I: Misura quanto sono simili le nicchie, enfatizzando la somiglianza anche in aree a bassa densità. Più dettagliato per analisi sottili.
 
 
 # Carica le librerie necessarie
