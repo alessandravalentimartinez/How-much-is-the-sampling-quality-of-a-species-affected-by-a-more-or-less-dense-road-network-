@@ -1,1 +1,140 @@
-Ho suddiviso il file in subset ogni 200 occorrenze, a partire da 48 dove il valore D è massimo 
+#Ho suddiviso il file in subset ogni 200 occorrenze, a partire da 48 dove il valore D è massimo 
+
+
+
+# Caricamento delle librerie necessarie
+library(ecospat)
+library(raster)
+library(terra)
+library(sp)
+library(viridis)
+library(sf)
+library(markdown)
+library(rmarkdown)
+library(geodata)
+library(ade4)
+
+# Imposta la directory di lavoro
+setwd("C:/tesi")
+
+# Lista dei file
+files <- c("Sp1_0.35_800_D249449", "Sp1_0.35_800_D450650", "Sp1_0.35_800_Dmax", "Sp1_0.35_800_Dfinale")
+
+# Caricamento shapefile della Sicilia
+aoi_sicilia <- st_read("C:/tesi/Sicilia.shp")  # Carica il tuo shapefile della Sicilia
+
+# Bounding box per delimitare l'area di studio
+sicilia_bb <- st_bbox(aoi_sicilia)
+
+# Variabili bioclimatiche dal WorldClim
+tmin <- worldclim_country("Ita", "tmin", path = tempdir(), res = 0.5, version = "2.1")
+tmax <- worldclim_country("Ita", "tmax", path = tempdir(), res = 0.5, version = "2.1")
+prec <- worldclim_country("Ita", "prec", path = tempdir(), res = 0.5, version = "2.1")
+
+# Selezione del primo mese
+tmin <- tmin$ITA_wc2.1_30s_tmin_1
+tmax <- tmax$ITA_wc2.1_30s_tmax_1
+prec <- prec$ITA_wc2.1_30s_prec_1
+
+# Creazione di uno stack raster
+r_list <- c(tmin, tmax, prec)
+mydata <- raster::stack(r_list)
+
+# Crop e mask dei raster per l'area della Sicilia
+aoi_sp <- sf::as_Spatial(aoi_sicilia)
+mydata_sicilia <- mydata %>% crop(., aoi_sp) %>% mask(., aoi_sp)
+
+# Rinomina i layer nel raster stack
+names(mydata_sicilia) <- c("Temperature Minimum", "Temperature Maximum", "Precipitation")
+
+# Creazione della griglia geografica (adatta per la Sicilia)
+geoGrid <- expand.grid(longitude = seq(11.92587, 15.65330, length.out = 250),  # Modifica questi valori per la tua area geografica
+                       latitude = seq(35.49345, 38.81213, length.out = 250))  # Modifica questi valori per la tua area geografica
+
+# Converti il SpatialPolygonsDataFrame della Sicilia in un oggetto SpatVector
+mask_spat <- vect(aoi_sicilia)
+
+
+# Iterazione sui file
+for (file in files) {
+  # Costruzione del percorso completo al file CSV
+  filepath <- paste0("C:/tesi/Specie virtuali/SICILIA/grafici/", file, ".csv")
+  
+  data_specie <- read.csv(filepath, sep = ";")  # se il separatore è punto e virgola
+  
+  data_biased <- subset(data_specie, BIASED == TRUE)
+  data_unbiased <- subset(data_specie, UNBIASED == TRUE)
+  
+  # Rimuovi valori NA dalle coordinate (se presenti)
+  data_biased <- data_biased[complete.cases(data_biased), ]
+  data_unbiased <- data_unbiased[complete.cases(data_unbiased), ]
+  
+  # Conversione in oggetti spaziali
+  coordinates(data_biased) <- c("X", "Y")
+  proj4string(data_biased) <- CRS("+proj=longlat +datum=WGS84")
+  
+  coordinates(data_unbiased) <- c("X", "Y")
+  proj4string(data_unbiased) <- CRS("+proj=longlat +datum=WGS84")
+  
+  # Creazione del grafico per le occorrenze Biased e Unbiased separati
+  pdf(paste0("C:/tesi/Specie virtuali/SICILIA/grafici/", file, "_occurrences_map.pdf"))
+  
+  # Visualizzazione delle occorrenze biased e unbiased in due grafici separati
+  par(mfrow = c(1, 2))
+  
+  # Plot delle occorrenze Biased
+  plot(aoi_sp, main = paste("Occorrenze Biased -", file), border = "black", xlab = "", ylab = "", xaxt = "n", yaxt = "n")
+  axis(1)
+  axis(2)
+  points(data_biased, col = "red", pch = 16, cex = 0.5)
+  box()
+  
+  # Plot delle occorrenze Unbiased
+  plot(aoi_sp, main = paste("Occorrenze Unbiased -", file), border = "black", xlab = "", ylab = "", xaxt = "n", yaxt = "n")
+  axis(1)
+  axis(2)
+  points(data_unbiased, col = "blue", pch = 16, cex = 0.5)
+  box()
+  
+  dev.off()  # Chiudi il file PDF
+  
+  # Pre-analisi
+  biased_env <- raster::extract(mydata_sicilia, data_biased)
+  unbiased_env <- raster::extract(mydata_sicilia, data_unbiased)
+  
+  # Rimuovere valori NA
+  biased_env <- biased_env[complete.cases(biased_env), ]
+  unbiased_env <- unbiased_env[complete.cases(unbiased_env), ]
+  
+  # Statistiche di base
+  biased_stats <- apply(biased_env, 2, function(x) c(min = min(x, na.rm = TRUE), median = median(x, na.rm = TRUE), mean = mean(x, na.rm = TRUE), max = max(x, na.rm = TRUE), sd = sd(x, na.rm = TRUE)))
+  unbiased_stats <- apply(unbiased_env, 2, function(x) c(min = min(x, na.rm = TRUE), median = median(x, na.rm = TRUE), mean = mean(x, na.rm = TRUE), max = max(x, na.rm = TRUE), sd = sd(x, na.rm = TRUE)))
+  
+  bioStats <- rbind(biased_stats, unbiased_stats)
+  print(head(bioStats))
+  
+  # Creazione della griglia climatica dinamica (biased)
+  biasedGeoGrid <- ecospat.grid.clim.dyn(geoGrid, geoGrid,
+                                         coordinates(data_biased),  # Usa le coordinate delle occorrenze biased
+                                         geomask = mask_spat)  # Usa la maschera geografica della Sicilia
+  
+  # Creazione della griglia climatica dinamica (unbiased)
+  unbiasedGeoGrid <- ecospat.grid.clim.dyn(geoGrid, geoGrid,
+                                           coordinates(data_unbiased),  # Usa le coordinate delle occorrenze unbiased
+                                           geomask = mask_spat)  # Usa la maschera geografica della Sicilia
+  
+  # Plot delle nicchie dinamiche per i due periodi (early e late)
+  pdf(paste0("C:/tesi/Specie virtuali/SICILIA/grafici/", file, "_niche_overlap.pdf"))
+  ecospat.plot.niche.dyn(biasedGeoGrid, unbiasedGeoGrid, quant = 0.1, interest = 2, 
+                         title = paste("Niche Overlap -", file), name.axis1 = "PC1", name.axis2 = "PC2")
+  dev.off()  # Chiudi il file PDF
+  
+  # Plot delle nicchie dinamiche per la Sicilia
+  pdf(paste0("C:/tesi/Specie virtuali/SICILIA/grafici/", file, "_niche_dynamic.pdf"))
+  ecospat.plot.niche.dyn(biasedGeoGrid, unbiasedGeoGrid, quant = 0)
+  plot(aoi_sicilia$geometry, add = TRUE)  # Sovrapponi lo shapefile della Sicilia
+  dev.off()  # Chiudi il file PDF
+  
+  dynamic_index <- ecospat.niche.dyn.index(biasedGeoGrid, unbiasedGeoGrid, intersection = 0.1)$dynamic.index.w
+  print(paste("Dynamic Index for", file, ":", dynamic_index))
+}
