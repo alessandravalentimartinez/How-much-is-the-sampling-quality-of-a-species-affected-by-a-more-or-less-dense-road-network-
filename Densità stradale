@@ -1,1 +1,85 @@
 #calcolo densità stradale
+
+
+#"La densità stradale in Sicilia è di 0.22 km per km²"
+#"La densità stradale in Lombardia è di 0.23 km per km²"
+
+
+
+
+
+# Load necessary packages
+library(sf)             # For spatial data manipulation and shapefiles
+library(dplyr)          # For data manipulation using dplyr functions
+library(osmextract)     # For downloading and extracting OpenStreetMap (OSM) data
+library(osmdata)        # For downloading OpenStreetMap data
+
+# Set the working directory
+setwd("C:/tesi")
+
+################ LOMBARDIA #######################################
+
+# Load the shapefile of Lombardia
+aoi_lombardia <- st_read("lombardia.shp") %>% .$geometry
+
+# Plot the region to visualize its geometry
+plot(aoi_lombardia)
+
+# Get the bounding box of the region
+lombardia_bb <- st_bbox(aoi_lombardia)
+
+# Define the type of road you want to extract from OpenStreetMap
+ht_secondary <- "secondary"
+
+# Download OpenStreetMap data for Lombardia
+osm_lombardia <- oe_get("Lombardia", stringsAsFactors = FALSE, quiet = TRUE)
+osm_lombardia_roads <- osm_lombardia[osm_lombardia$highway %in% ht_secondary, ]
+
+# Aggiungi una colonna per la lunghezza di ogni segmento stradale in km
+osm_lombardia_roads$length_km <- st_length(osm_lombardia_roads) / 1000
+
+# Calcola la lunghezza totale delle strade in km
+total_road_length_km <- sum(osm_lombardia_roads$length_km, na.rm = TRUE)
+
+# Calcola la superficie della Lombardia in km²
+area_lombardia_km2 <- st_area(aoi_lombardia) / 1e6  # Dividi per 1e6 per ottenere km²
+
+# Calcola la densità stradale in km/km²
+road_density_km_km2 <- total_road_length_km / area_lombardia_km2
+
+# Stampa il risultato
+print(paste("La densità stradale in Lombardia è di", round(road_density_km_km2, 2), "km per km²"))
+
+################ SICILIA #######################################
+
+# Load the shapefile of Sicily
+aoi_sicilia <- st_read("sicilia.shp") %>% .$geometry
+
+# Plot the region to visualize its geometry
+plot(aoi_sicilia)
+
+# Get the bounding box of the region
+sicilia_bb <- st_bbox(aoi_sicilia)
+
+# Define the type of road you want to extract from OpenStreetMap
+ht_secondary <- "secondary"
+
+# Download OpenStreetMap data for Sicily
+osm_sicilia <- oe_get("Sicilia", stringsAsFactors = FALSE, quiet = TRUE)
+osm_sicilia_roads <- osm_sicilia[osm_sicilia$highway %in% ht_secondary, ]
+
+# Aggiungi una colonna per la lunghezza di ogni segmento stradale in km
+osm_sicilia_roads$length_km <- st_length(osm_sicilia_roads) / 1000
+
+# Calcola la lunghezza totale delle strade in km
+total_road_length_km <- sum(osm_sicilia_roads$length_km, na.rm = TRUE)
+
+# Calcola la superficie della Sicilia in km²
+area_sicilia_km2 <- st_area(aoi_sicilia) / 1e6  # Dividi per 1e6 per ottenere km²
+
+# Calcola la densità stradale in km/km²
+road_density_km_km2 <- total_road_length_km / area_sicilia_km2
+
+# Stampa il risultato
+print(paste("La densità stradale in Sicilia è di", round(road_density_km_km2, 2), "km per km²"))
+
