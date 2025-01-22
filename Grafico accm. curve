@@ -1,0 +1,36 @@
+
+
+# Carica le librerie necessarie
+library(ggplot2)
+library(readr)
+
+# Carica il file CSV
+file_path <- "C:/tesi/Specie virtuali/SICILIA/Accumulation curve/species_1_sp_prevalence_0.35_sample_prev_0.9_n_occ_800_accumulation_curve.csv"
+data <- read.csv(file_path)
+
+# Visualizza le prime righe del dataframe per assicurarsi che i dati siano corretti
+head(data)
+
+# Crea il grafico 
+plot <- ggplot() +
+  # Aggiungi i punti per D con colore pastello
+  geom_point(data = data, aes(x = `Num.Occurrences`, y = D), color = "#AEC6CF", size = 2) +
+  # Aggiungi i punti per I con colore pastello
+  geom_point(data = data, aes(x = `Num.Occurrences`, y = I), color = "#FFB6C1", size = 2) +
+  # Aggiungi la curva di tendenza LOESS per D 
+  geom_smooth(data = data, aes(x = `Num.Occurrences`, y = D), 
+              method = "loess", se = FALSE, color = "#779ECB", size = 1, linetype = "solid") +
+  # Aggiungi la curva di tendenza LOESS per I 
+  geom_smooth(data = data, aes(x = `Num.Occurrences`, y = I), 
+              method = "loess", se = FALSE, color = "#FF9999", size = 1, linetype = "solid") +
+  # Etichette e titolo
+  labs(title = "D/I - Curva di Accumulazione",
+       x = "Numero di Occorrenze",
+       y = "Valore",
+       color = "Curva") +
+  # Tema minimale
+  theme_minimal()
+
+# Visualizza il grafico
+print(plot)
+
