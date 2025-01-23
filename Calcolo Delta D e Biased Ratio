@@ -324,7 +324,6 @@ data <- read.csv(file_path)
 ggplot(data, aes(x = BiasedRatio, y = DeltaD, color = SpeciesPrevalence)) +
   geom_point(size = 3) +  # Aggiungi i punti
   scale_color_viridis(option = "D") +  # Utilizza la gradazione di colore viridis per il `SpeciesPrevalence`
-  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 1) +  # Aggiungi linea di tendenza rossa con linewidth
   labs(
     title = "Biased Ratio vs DeltaD",
     x = "Biased Ratio",
