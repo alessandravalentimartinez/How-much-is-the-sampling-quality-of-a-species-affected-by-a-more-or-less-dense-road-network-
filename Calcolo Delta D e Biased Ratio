@@ -6,7 +6,7 @@ library(stringr)
 library(readr)
 
 
-
+#SICILIA#
 ################################ Una specie calcolo Delta
 
 
@@ -335,8 +335,321 @@ ggplot(data, aes(x = BiasedRatio, y = DeltaD, color = SpeciesPrevalence)) +
 
 
 
+#LOMBARDIA#
+library(dplyr)
+library(stringr)
+library(readr)
 
+################################ Una specie calcolo Delta
 
+# Percorso al file specifico
+file_path <- "C:/tesi/Specie virtuali/LOMBARDIA/Accumulation curve/species_1_sp_prevalence_0.1_sample_prev_0.9_n_occ_600_accumulation_curve.csv"
 
+# Carica il file
+data <- read.csv(file_path)
 
- 
+# Estrai valori
+D_max <- max(data$D, na.rm = TRUE)
+I_max <- max(data$I, na.rm = TRUE)
+D_final <- tail(data$D, n = 1)
+I_final <- tail(data$I, n = 1)
+Delta_D <- (D_max - D_final) / (D_max + D_final)
+
+# Estrai informazioni dal nome del file
+file_info <- strsplit(basename(file_path), "_")[[1]]
+species <- file_info[2]
+sp_prevalence <- as.numeric(file_info[5])  # Prevalence è nella posizione 5
+n_occ <- as.numeric(file_info[11])        # Occorrenze nella posizione 11
+
+# Crea un data frame con i risultati
+results <- data.frame(
+  Species = species,
+  SpeciesPrevalence = sp_prevalence,
+  Dmax = D_max,
+  Dfinal = D_final,
+  DeltaD = Delta_D
+)
+
+# Costruisci il percorso della cartella dei risultati
+results_dir <- "C:/tesi/Specie virtuali/LOMBARDIA/Accumulation curve/results"
+if (!dir.exists(results_dir)) {
+  dir.create(results_dir)
+}
+
+# Costruisci il nome del file di output nella cartella results
+output_file <- paste0(
+  results_dir, "/",
+  gsub("\\.csv$", "", basename(file_path)),
+  "_results.csv"
+)
+
+# Salva i risultati in un file CSV
+write.csv(results, output_file, row.names = FALSE)
+
+########################### tutte le specie calcolo Delta
+
+# Percorso alla cartella contenente i file CSV
+folder_path <- "C:/tesi/Specie virtuali/LOMBARDIA/Accumulation curve"
+
+# Elenco di tutti i file CSV nella cartella
+csv_files <- list.files(path = folder_path, pattern = "*.csv", full.names = TRUE)
+
+# Inizializza una lista per raccogliere i risultati
+all_results <- list()
+
+# Ciclo su ogni file CSV
+for (file_path in csv_files) {
+  
+  # Carica i dati
+  data <- read.csv(file_path)
+  
+  # Estrai i valori richiesti
+  D_max <- max(data$D, na.rm = TRUE)
+  D_final <- tail(data$D, n = 1)
+  Delta_D <- (D_max - D_final) / (D_max + D_final)
+  
+  # Estrai informazioni dal nome del file
+  file_info <- strsplit(basename(file_path), "_")[[1]]
+  species <- file_info[2]                # Specie è nella posizione 2
+  sp_prevalence <- as.numeric(file_info[5])  # Prevalence è nella posizione 5
+  n_occ <- as.numeric(file_info[11])        # Occorrenze nella posizione 11
+  
+  # Crea un data frame con i risultati per questo file
+  results <- data.frame(
+    Species = species,
+    SpeciesPrevalence = sp_prevalence,
+    N_Occurrences = n_occ,
+    Dmax = D_max,
+    Dfinal = D_final,
+    DeltaD = Delta_D
+  )
+  
+  # Aggiungi i risultati alla lista
+  all_results[[length(all_results) + 1]] <- results
+}
+
+# Unisci tutti i risultati in un unico data frame
+final_results <- bind_rows(all_results)
+
+# Percorso alla cartella dei risultati
+results_dir <- "C:/tesi/Specie virtuali/LOMBARDIA/Accumulation curve/results"
+if (!dir.exists(results_dir)) {
+  dir.create(results_dir)
+}
+
+# Nome del file di output
+output_file <- paste0(results_dir, "/all_species_results_LOMBARDIA.csv")
+
+# Salva i risultati in un file CSV
+write.csv(final_results, output_file, row.names = FALSE)
+
+# Messaggio di conferma
+cat("Risultati salvati in:", output_file, "\n")
+
+################################################################## rapporto occorrenze biased/tot
+
+# Percorso alla cartella contenente i file CSV
+folder_path <- "C:/tesi/Specie virtuali/LOMBARDIA"
+
+# Elenco di tutti i file CSV nella cartella
+csv_files <- list.files(path = folder_path, pattern = "*.csv", full.names = TRUE)
+
+# Inizializza una lista per raccogliere i risultati
+all_results <- list()
+
+# Ciclo su ogni file CSV
+for (file_path in csv_files) {
+  
+  # Carica i dati
+  data <- read.csv(file_path)
+  
+  # Verifica se le colonne 'BIASED' e 'UNBIASED' esistono
+  if (!("BIASED" %in% colnames(data)) | !("UNBIASED" %in% colnames(data))) {
+    cat("File ignorato (colonne 'BIASED' o 'UNBIASED' mancanti):", basename(file_path), "\n")
+    next  # Se non ci sono, passa al prossimo file
+  }
+  
+  # Calcola il numero totale di occorrenze e quelle biased
+  total_occurrences <- nrow(data)
+  biased_occurrences <- sum(data$BIASED == TRUE, na.rm = TRUE)
+  
+  # Estrai informazioni dal nome del file
+  file_info <- strsplit(basename(file_path), "_")[[1]]
+  species <- file_info[2]                # Specie è nella posizione 2
+  sp_prevalence <- as.numeric(file_info[5])  # Prevalence è nella posizione 5
+  
+  # Estrai il numero di occorrenze dal nome del file (ad esempio "n_occ_700")
+  n_occ <- as.numeric(str_extract(file_info[11], "\\d+"))  # Estrae il numero dopo "n_occ_"
+  
+  # Calcola il rapporto n. occorrenze biased / n. occorrenze totali
+  biased_ratio <- biased_occurrences / total_occurrences
+  
+  # Crea un data frame con i risultati per questo file
+  results <- data.frame(
+    Species = species,
+    SpeciesPrevalence = sp_prevalence,
+    N_Occurrences = n_occ,
+    BiasedRatio = biased_ratio
+  )
+  
+  # Aggiungi i risultati alla lista
+  all_results[[length(all_results) + 1]] <- results
+}
+
+# Se ci sono risultati, unisci tutti i dati
+if (length(all_results) > 0) {
+  final_results <- bind_rows(all_results)
+  
+  # Percorso alla cartella dei risultati
+  results_dir <- "C:/tesi/Specie virtuali/LOMBARDIA/results"
+  if (!dir.exists(results_dir)) {
+    dir.create(results_dir)
+  }
+  
+  # Nome del file di output
+  output_file <- paste0(results_dir, "/all_species_biased_ratio_LOMBARDIA.csv")
+  
+  # Salva i risultati in un file CSV
+  write.csv(final_results, output_file, row.names = FALSE)
+  cat("Risultati salvati in:", output_file, "\n")
+} else {
+  cat("Nessun risultato valido trovato. Verifica i dati.\n")
+}
+
+############################### risultati in un unico file csv sia biased ratio che delta D 
+
+# Percorso alla cartella contenente i file CSV per il primo calcolo (Accumulation Curve)
+folder_path_1 <- "C:/tesi/Specie virtuali/LOMBARDIA/Accumulation curve"
+
+# Elenco di tutti i file CSV nella cartella per il primo calcolo
+csv_files_1 <- list.files(path = folder_path_1, pattern = "*.csv", full.names = TRUE)
+
+# Inizializza una lista per raccogliere i risultati dal primo script
+accumulation_results <- list()
+
+# Ciclo su ogni file CSV per il primo calcolo (Accumulation Curve)
+for (file_path in csv_files_1) {
+  
+  # Carica i dati
+  data <- read.csv(file_path)
+  
+  # Estrai i valori richiesti
+  D_max <- max(data$D, na.rm = TRUE)
+  D_final <- tail(data$D, n = 1)
+  Delta_D <- (D_max - D_final) / (D_max + D_final)
+  
+  # Estrai informazioni dal nome del file
+  file_info <- strsplit(basename(file_path), "_")[[1]]
+  species <- file_info[2]                # Specie è nella posizione 2
+  sp_prevalence <- as.numeric(file_info[5])  # Prevalence è nella posizione 5
+  n_occ <- as.numeric(file_info[11])        # Occorrenze nella posizione 11
+  
+  # Crea un data frame con i risultati per questo file
+  results <- data.frame(
+    Species = species,
+    SpeciesPrevalence = sp_prevalence,
+    N_Occurrences = n_occ,
+    Dmax = D_max,
+    Dfinal = D_final,
+    DeltaD = Delta_D
+  )
+  
+  # Aggiungi i risultati alla lista
+  accumulation_results[[length(accumulation_results) + 1]] <- results
+}
+
+# Unisci tutti i risultati in un unico data frame per il primo script
+accumulation_final <- bind_rows(accumulation_results)
+
+# Percorso alla cartella contenente i file CSV per il secondo calcolo (Biased Ratio)
+folder_path_2 <- "C:/tesi/Specie virtuali/LOMBARDIA"
+
+# Elenco di tutti i file CSV nella cartella per il secondo calcolo
+csv_files_2 <- list.files(path = folder_path_2, pattern = "*.csv", full.names = TRUE)
+
+# Inizializza una lista per raccogliere i risultati dal secondo script
+biased_results <- list()
+
+# Ciclo su ogni file CSV per il secondo calcolo (Biased Ratio)
+for (file_path in csv_files_2) {
+  
+  # Carica i dati
+  data <- read.csv(file_path)
+  
+  # Verifica se le colonne 'BIASED' e 'UNBIASED' esistono
+  if (!("BIASED" %in% colnames(data)) | !("UNBIASED" %in% colnames(data))) {
+    cat("File ignorato (colonne 'BIASED' o 'UNBIASED' mancanti):", basename(file_path), "\n")
+    next  # Se non ci sono, passa al prossimo file
+  }
+  
+  # Calcola il numero totale di occorrenze e quelle biased
+  total_occurrences <- nrow(data)
+  biased_occurrences <- sum(data$BIASED == TRUE, na.rm = TRUE)
+  
+  # Estrai informazioni dal nome del file
+  file_info <- strsplit(basename(file_path), "_")[[1]]
+  species <- file_info[2]                # Specie è nella posizione 2
+  sp_prevalence <- as.numeric(file_info[5])  # Prevalence è nella posizione 5
+  
+  # Estrai il numero di occorrenze dal nome del file
+  n_occ <- as.numeric(str_extract(file_info[11], "\\d+"))  # Estrae il numero dopo "n_occ_"
+  
+  # Calcola il rapporto n. occorrenze biased / n. occorrenze totali
+  biased_ratio <- biased_occurrences / total_occurrences
+  
+  # Crea un data frame con i risultati per questo file
+  results <- data.frame(
+    Species = species,
+    SpeciesPrevalence = sp_prevalence,
+    N_Occurrences = n_occ,
+    BiasedRatio = biased_ratio
+  )
+  
+  # Aggiungi i risultati alla lista
+  biased_results[[length(biased_results) + 1]] <- results
+}
+
+# Unisci tutti i risultati in un unico data frame per il secondo script
+biased_final <- bind_rows(biased_results)
+
+# Unisci i due data frame sui risultati
+combined_results <- left_join(accumulation_final, biased_final, by = c("Species", "SpeciesPrevalence", "N_Occurrences"))
+
+# Percorso alla cartella dei risultati
+results_dir <- "C:/tesi/Specie virtuali/LOMBARDIA/results"
+if (!dir.exists(results_dir)) {
+  dir.create(results_dir)
+}
+
+# Nome del file di output
+output_file <- paste0(results_dir, "/combined_species_results_LOMBARDIA.csv")
+
+# Salva i risultati in un file CSV
+write.csv(combined_results, output_file, row.names = FALSE)
+
+# Messaggio di conferma
+cat("Risultati combinati salvati in:", output_file, "\n")
+
+################# GRAFICO 
+
+library(ggplot2)
+library(viridis)
+library(readr)
+
+# Percorso al file combinato della Lombardia
+file_path <- "C:/tesi/Specie virtuali/LOMBARDIA/results/combined_species_results_LOMBARDIA.csv"
+
+# Carica i dati dal file CSV creato precedentemente
+data <- read.csv(file_path)
+
+# Creazione del grafico con linea di tendenza rossa e correzione per eventuali warning
+ggplot(data, aes(x = BiasedRatio, y = DeltaD, color = SpeciesPrevalence)) +
+  geom_point(size = 3) +  # Aggiungi i punti
+  scale_color_viridis(option = "D") +  # Utilizza la gradazione di colore viridis per il SpeciesPrevalence
+  labs(
+    title = "Biased Ratio vs DeltaD (Lombardia)",
+    x = "Biased Ratio",
+    y = "DeltaD",
+    color = "Species Prevalence"
+  ) +
+  theme_minimal()  # Tema minimale per il grafico
