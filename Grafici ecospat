@@ -152,7 +152,7 @@ for (file in files) {
                                            coordinates(data_unbiased),  # Usa le coordinate delle occorrenze unbiased
                                            geomask = mask_spat)  # Usa la maschera geografica della Sicilia
   
-  # Plot delle nicchie dinamiche per i due periodi (early e late)
+  # Plot delle nicchie dinamiche 
   niche_dynamic_pdf_path <- paste0("C:/tesi/Specie virtuali/SICILIA/grafici/", file, "_niche_dynamic.pdf")
   pdf(niche_dynamic_pdf_path)  # Salva il grafico Niche Dynamic in PDF
   
