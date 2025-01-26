@@ -21,7 +21,7 @@ D_max <- max(data$D, na.rm = TRUE)
 I_max <- max(data$I, na.rm = TRUE)
 D_final <- tail(data$D, n = 1)
 I_final <- tail(data$I, n = 1)
-Delta_D <- (D_max - D_final) / (D_max + D_final)
+Delta_D <- D_max - D_final
 
 # Estrai informazioni dal nome del file
 file_info <- strsplit(basename(file_path), "_")[[1]]
@@ -79,7 +79,7 @@ for (file_path in csv_files) {
   # Estrai i valori richiesti
   D_max <- max(data$D, na.rm = TRUE)
   D_final <- tail(data$D, n = 1)
-  Delta_D <- (D_max - D_final) / (D_max + D_final)
+  Delta_D <- D_max - D_final
   
   # Estrai informazioni dal nome del file
   file_info <- strsplit(basename(file_path), "_")[[1]]
@@ -215,7 +215,7 @@ for (file_path in csv_files_1) {
   # Estrai i valori richiesti
   D_max <- max(data$D, na.rm = TRUE)
   D_final <- tail(data$D, n = 1)
-  Delta_D <- (D_max - D_final) / (D_max + D_final)
+  Delta_D <- D_max - D_final
   
   # Estrai informazioni dal nome del file
   file_info <- strsplit(basename(file_path), "_")[[1]]
@@ -352,7 +352,7 @@ D_max <- max(data$D, na.rm = TRUE)
 I_max <- max(data$I, na.rm = TRUE)
 D_final <- tail(data$D, n = 1)
 I_final <- tail(data$I, n = 1)
-Delta_D <- (D_max - D_final) / (D_max + D_final)
+Delta_D <- D_max - D_final
 
 # Estrai informazioni dal nome del file
 file_info <- strsplit(basename(file_path), "_")[[1]]
@@ -405,7 +405,7 @@ for (file_path in csv_files) {
   # Estrai i valori richiesti
   D_max <- max(data$D, na.rm = TRUE)
   D_final <- tail(data$D, n = 1)
-  Delta_D <- (D_max - D_final) / (D_max + D_final)
+  Delta_D <- D_max - D_final
   
   # Estrai informazioni dal nome del file
   file_info <- strsplit(basename(file_path), "_")[[1]]
@@ -535,7 +535,7 @@ for (file_path in csv_files_1) {
   # Estrai i valori richiesti
   D_max <- max(data$D, na.rm = TRUE)
   D_final <- tail(data$D, n = 1)
-  Delta_D <- (D_max - D_final) / (D_max + D_final)
+  Delta_D <- D_max - D_final
   
   # Estrai informazioni dal nome del file
   file_info <- strsplit(basename(file_path), "_")[[1]]
