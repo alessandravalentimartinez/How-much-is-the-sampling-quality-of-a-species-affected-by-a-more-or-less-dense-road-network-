@@ -1,0 +1,174 @@
+library(maps)
+library(terra)
+library(ggplot2)
+library(tidyverse)
+library(ggeffects)
+library(lme4)
+library(performance)
+library(mgcv)
+
+########## SICILIA #########
+
+setwd("C:/tesi/Specie virtuali/SICILIA/results")
+
+d <- read.csv("all_species_combined_results.csv")
+# %>% 
+#  pivot_longer(., cols = c("D", "I"), names_to = "Metric", values_to = "Value")
+
+
+# prima: relazione fra species prevalence e biased ratio
+hist(d$BiasedRatio, breaks = 40)
+
+# rapporto fra i due (prova lm, glm, gam)
+lm_d <- glm(BiasedRatio ~  SpeciesPrevalence, 
+            family = quasibinomial, 
+            data = d)
+
+summary(lm_d)           
+plot(residuals(lm_d))
+
+# RMSE
+residuals_glm <- residuals(lm_d, type = "response")
+
+# Calcolo del RMSE
+rmse_residuals <- sqrt(mean(residuals_glm^2))
+
+# Output del RMSE
+print(paste("RMSE dei residui:", rmse_residuals))
+
+
+# relazione fra delta d, biased ratio e species prevalence
+# deltaDI, biased ratio e species prevalence
+glm_d <- glm(DeltaD ~ BiasedRatio + SpeciesPrevalence, 
+             family = quasibinomial, 
+             data = d)
+
+summary(glm_d)
+
+plot(residuals(glm_d))
+
+
+# ggeffects 
+ggpredict(glm_d, terms = c("BiasedRatio[all]", "SpeciesPrevalence")) %>% 
+  plot() 
+
+
+ggpredict(glm_d, terms = c("SpeciesPrevalence", "BiasedRatio"))  %>% 
+  plot()
+
+
+# Modello GAM con smoothing su BiasedRatio e SpeciesPrevalence
+gam_d <- gam(DeltaD ~ s(BiasedRatio) + s(SpeciesPrevalence), 
+             family = quasibinomial, 
+             data = d)
+
+# Output del modello
+summary(gam_d)
+
+# Grafico dei termini smooth
+plot(gam_d, pages = 1)
+
+# Controllo diagnostico dei residui
+gam.check(gam_d)
+
+# Grafico dei residui
+plot(residuals(gam_d), main = "Residuals of GAM", ylab = "Residuals")
+
+# Residui del modello GAM
+residuals_gam <- residuals(gam_d, type = "response")
+
+# Calcolo dell'RMSE
+rmse_gam <- sqrt(mean(residuals_gam^2))
+
+# Output del RMSE
+print(paste("RMSE dei residui GAM:", rmse_gam))
+
+
+# Effetti stimati con ggeffects
+ggpredict(gam_d, terms = c("BiasedRatio[all]", "SpeciesPrevalence")) %>% plot()
+
+ggpredict(gam_d, terms = c("SpeciesPrevalence", "BiasedRatio")) %>% plot()
+
+
+########## LOMBARDIA #########
+
+
+setwd("C:/tesi/Specie virtuali/LOMBARDIA/results")
+
+d <- read.csv("combined_species_results_LOMBARDIA.csv")
+# %>% 
+#  pivot_longer(., cols = c("D", "I"), names_to = "Metric", values_to = "Value")
+
+
+# prima: relazione fra species prevalence e biased ratio
+hist(d$BiasedRatio, breaks = 40)
+
+# rapporto fra i due (prova lm, glm, gam)
+lm_d <- glm(BiasedRatio ~  SpeciesPrevalence, 
+            family = quasibinomial, 
+            data = d)
+
+summary(lm_d)           
+plot(residuals(lm_d))
+
+# RMSE
+residuals_glm <- residuals(lm_d, type = "response")
+
+# Calcolo del RMSE
+rmse_residuals <- sqrt(mean(residuals_glm^2))
+
+# Output del RMSE
+print(paste("RMSE dei residui:", rmse_residuals))
+
+
+# relazione fra delta d, biased ratio e species prevalence
+# deltaDI, biased ratio e species prevalence
+glm_d <- glm(DeltaD ~ BiasedRatio + SpeciesPrevalence, 
+             family = quasibinomial, 
+             data = d)
+
+summary(glm_d)
+
+plot(residuals(glm_d))
+
+
+# ggeffects 
+ggpredict(glm_d, terms = c("BiasedRatio[all]", "SpeciesPrevalence")) %>% 
+  plot() 
+
+
+ggpredict(glm_d, terms = c("SpeciesPrevalence", "BiasedRatio"))  %>% 
+  plot()
+
+
+# Modello GAM con smoothing su BiasedRatio e SpeciesPrevalence
+gam_d <- gam(DeltaD ~ s(BiasedRatio) + s(SpeciesPrevalence), 
+             family = quasibinomial, 
+             data = d)
+
+# Output del modello
+summary(gam_d)
+
+# Grafico dei termini smooth
+plot(gam_d, pages = 1)
+
+# Controllo diagnostico dei residui
+gam.check(gam_d)
+
+# Grafico dei residui
+plot(residuals(gam_d), main = "Residuals of GAM", ylab = "Residuals")
+
+# Residui del modello GAM
+residuals_gam <- residuals(gam_d, type = "response")
+
+# Calcolo dell'RMSE
+rmse_gam <- sqrt(mean(residuals_gam^2))
+
+# Output del RMSE
+print(paste("RMSE dei residui GAM:", rmse_gam))
+
+
+# Effetti stimati con ggeffects
+ggpredict(gam_d, terms = c("BiasedRatio[all]", "SpeciesPrevalence")) %>% plot()
+
+ggpredict(gam_d, terms = c("SpeciesPrevalence", "BiasedRatio")) %>% plot()
