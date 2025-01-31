@@ -1,0 +1,1838 @@
+# Load necessary packages
+library(sf)             # For spatial data manipulation and shapefiles
+library(raster)         # For raster data manipulation
+library(virtualspecies) # For virtual species generation
+library(ggplot2)        # For plotting data using ggplot2
+library(dplyr)          # For data manipulation using dplyr functions
+library(terra)          # For spatial analysis (terra is a modern alternative to raster)
+library(geodata)        # For downloading WorldClim data and other geospatial datasets
+library(osmdata)        # For downloading OpenStreetMap data
+library(viridis)        # For using viridis color scales in plots
+library(rlang)          # For handling expressions and variable evaluation
+library(osmextract)     # For downloading and extract OpenStreetMap (OSM) data for specific geographic areas.
+
+
+# Set the working directory
+setwd("C:/tesi")
+
+############################### DOWNLOAD DATI BIOCLIMATICI E RETICOLO STRADALE E CREAZIONE SPECIE VIRTUALI ######################
+
+################ SICILIA #######################################
+
+# Load the shapefile of Sicily
+aoi_sicilia <- st_read("sicilia.shp") %>% .$geometry
+
+# Plot the region to visualize its geometry
+plot(aoi_sicilia)
+
+# Get the bounding box of the region
+sicilia_bb <- st_bbox(aoi_sicilia)
+
+# Define the type of road you want to extract from OpenStreetMap
+ht_secondary <- "secondary"
+
+# Download OpenStreetMap data for Sicily
+osm_sicilia <- oe_get("Sicilia", stringsAsFactors = FALSE, quiet = TRUE)
+osm_sicilia_roads <- osm_sicilia[osm_sicilia$highway %in% ht_secondary, ]
+
+# Load bioclimatic variables from WorldClim for Italy
+tmin <- worldclim_country("Ita", "tmin", path=tempdir(), res = 0.5, version = "2.1")
+tmax <- worldclim_country("Ita", "tmax", path=tempdir(), res = 0.5, version = "2.1")
+prec <- worldclim_country("Ita", "prec", path=tempdir(), res = 0.5, version = "2.1")
+
+# Extract only the first month of data for each bioclimatic variable
+tmin <- tmin$ITA_wc2.1_30s_tmin_1
+tmax <- tmax$ITA_wc2.1_30s_tmax_1
+prec <- prec$ITA_wc2.1_30s_prec_1
+
+# Create a raster stack with bioclimatic variables
+r_list <- c(tmin, tmax, prec)
+mydata_sicilia <- raster::stack(r_list)
+
+# Crop and mask the raster stack with the region of interest (Sicily)
+aoi_sp <- sf::as_Spatial(aoi_sicilia)
+mydata_sicilia <- mydata_sicilia %>% crop(., aoi_sp) %>% mask(., aoi_sp)
+
+# Rename the raster layers for clarity
+names(mydata_sicilia) <- c("Temperature Minimum", "Temperature Maximum", "Precipitation")
+
+# Plot the Temperature Minimum layer
+plot(mydata_sicilia$`Temperature.Minimum`, main = "Temperature Minimum", col = viridis::viridis(100))
+
+# Plot the Temperature Maximum layer
+plot(mydata_sicilia$`Temperature.Maximum`, main = "Temperature Maximum", col = viridis::viridis(100))
+
+# Plot the Precipitation layer
+plot(mydata_sicilia$Precipitation, main = "Precipitation", col = viridis::viridis(100))
+
+# Convert the OSM road data into a vector format (using terra package)
+roads_vect_sicilia <- terra::vect(osm_sicilia_roads$geometry)
+
+# Rasterize the road data based on the first layer of the bioclimatic raster stack
+raster_roads_sicilia <- as(mydata_sicilia[[1]], "SpatRaster")
+r_sicilia <- terra::rasterize(roads_vect_sicilia, raster_roads_sicilia)
+
+# Calculate the distance to roads in kilometers
+d_sicilia <- distance(r_sicilia, unit = "km")
+
+# Convert the distance raster to a regular raster object for further analysis
+d_rast_sicilia <- d_sicilia %>% raster()
+
+# Calculate sampling probability based on the distances to roads
+distances_sicilia <- d_rast_sicilia %>% as.data.frame()
+c <- 1
+sampling_prob <- 1 - (((log(c * distances_sicilia)) / (log(max(c * distances_sicilia))))) %>% as.data.frame()
+
+# Replace infinite values with 1 (maximum probability) and ensure all probabilities are <= 1
+sampling_prob[sampling_prob == Inf] <- 1
+sampling_prob[sampling_prob > 1] <- 1
+
+# Classify the probability raster based on the calculated probabilities
+prob_raster <- classify(d_sicilia, cbind(values(d_sicilia), sampling_prob))
+
+############### Graphing ###################################
+
+# Ensure the region geometry is in the correct format (SpatVector)
+if (inherits(aoi_sicilia, "sf") || inherits(aoi_sicilia, "sfc")) {
+  aoi_sicilia <- vect(aoi_sicilia)  # Convert to SpatVector format
+}
+
+# Mask the distance raster with the region of interest (Sicily)
+d_rast_sicilia <- mask(d_sicilia, aoi_sicilia)
+
+# Mask the probability raster with the region of interest (Sicily)
+prob_raster_sicilia <- mask(prob_raster, aoi_sicilia)
+
+# Convert the distance raster to a dataframe for plotting with ggplot2
+raster_df_dist_sicilia <- as.data.frame(d_rast_sicilia, xy = TRUE)
+
+# Identify the column name for distance values
+value_column_dist_sicilia <- names(raster_df_dist_sicilia)[3]
+
+# Create a plot for the distance from roads using ggplot2
+ggplot() +
+  geom_tile(data = raster_df_dist_sicilia, aes(x = x, y = y, fill = !!sym(value_column_dist_sicilia))) +
+  scale_fill_viridis_c(option = "D", alpha = 1, begin = 0, end = 1) +
+  geom_sf(data = osm_sicilia_roads$geometry, color = "black", size = 0.5) +
+  theme_bw() +
+  theme_minimal() +
+  labs(title = "Distance from Roads (km)", fill = "Distance (km)") +
+  coord_sf() +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) +
+  scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +
+  scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))
+
+
+# Convert the distance raster (d_rast_sicilia) to a dataframe, adding x and y coordinates
+distances_sicilia <- as.data.frame(d_rast_sicilia, xy = TRUE)
+
+# Define the constant 'c' (as used in your code)
+c <- 1
+
+# Calculate the sampling probability based on the distance values
+sampling_prob <- 1 - (((log(c * distances_sicilia[, 3])) / (log(max(c * distances_sicilia[, 3])))))  # Calculate based on distance
+
+# Ensure that infinite values or those greater than 1 are handled correctly
+sampling_prob[sampling_prob == Inf] <- 1  # Replace infinite values with 1
+sampling_prob[sampling_prob > 1] <- 1    # Ensure no probabilities exceed 1
+
+# Add the calculated sampling probability to the dataframe
+distances_sicilia$sampling_prob <- sampling_prob
+
+# Create a plot for the sampling probabilities using ggplot
+ggplot() +
+  # Add the probability raster as tiles (geom_tile)
+  geom_tile(data = distances_sicilia, aes(x = x, y = y, fill = sampling_prob)) +
+  # Use the 'viridis' color palette for the fill
+  scale_fill_viridis_c(option = "D", alpha = 1, begin = 0, end = 1) +
+  # Add OpenStreetMap (OSM) roads (ensure osm_sicilia_roads is properly defined)
+  geom_sf(data = osm_sicilia_roads$geometry, color = "black", size = 0.5) + 
+  theme_bw() +  # Use a white background for the plot
+  theme_minimal() +  # Apply a minimal theme
+  labs(title = "Sampling Probability", fill = "Probability") +  # Add plot title and legend label
+  coord_sf() +  # Set up the plot to use spatial coordinates
+  theme(
+    axis.title.x = element_blank(),  # Remove x-axis label
+    axis.title.y = element_blank()   # Remove y-axis label
+  ) +
+  scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +  # Format x-axis labels as degrees East
+  scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))    # Format y-axis labels as degrees North
+
+
+
+############################# Virtual Species Generation ######################
+
+# Parameters for virtual species creation
+sample_prev <- 0.9   # Define sample prevalence
+n_species <- 5       # Number of species to generate
+
+# Combinations of species prevalence and occurrences
+sp_prev_values <- seq(0.05, 0.50, by = 0.05)
+n_occ_values <- c(600, 700, 800, 900, 1000)
+
+# Create a directory structure to save the output data
+main_dir <- "C:/tesi/specie_virtuali"
+sub_dir <- "sicilia"
+dir.create(main_dir, showWarnings = FALSE)
+dir.create(file.path(main_dir, sub_dir), showWarnings = FALSE)
+
+# Full path for output files
+output_dir <- file.path(main_dir, sub_dir)
+
+# Definition of the log file for Sicilia
+log_file_sicilia <- file.path(output_dir, "generation_log_sicilia.txt")
+cat("Start of virtual species generation for Sicilia\n", file = log_file_sicilia)
+
+# Loop through different prevalence values and occurrences for virtual species generation
+for (sp_prev in sp_prev_values) {
+  for (n_occ in n_occ_values) {
+    
+    # Log the start of a new combination
+    cat(paste("Starting generation for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file_sicilia, append = TRUE)
+    
+    species_created <- 0  # Counter for successfully created species
+    
+    # Generate up to 5 virtual species for each combination
+    while (species_created < n_species) {
+      
+      tryCatch({
+        # Generate the virtual species with the specified parameters
+        random.sp <- generateRandomSp(raster.stack = mydata_sicilia,
+                                      convert.to.PA = FALSE,
+                                      species.type = "multiplicative",
+                                      approach = "response",
+                                      relations = "gaussian",
+                                      realistic.sp = TRUE,
+                                      plot = FALSE)
+        
+        # Convert the species to presence-absence (PA) based on the given prevalence
+        new.pres <- convertToPA(random.sp,
+                                beta = "random",
+                                alpha = -0.05, 
+                                plot = FALSE,
+                                species.prevalence = sp_prev)
+        
+        # Sample random occurrences of the species
+        presence.points <- sampleOccurrences(new.pres,
+                                             n = n_occ,
+                                             type = "presence only",
+                                             sample.prevalence = sample_prev,
+                                             error.probability = 0,
+                                             detection.probability = 1,
+                                             correct.by.suitability = TRUE,
+                                             plot = FALSE)
+        
+        # Filter the sampled points to keep only the valid ones (Real == 1 and Observed == 1)
+        initial_occ <- presence.points$sample.points %>%
+          as.data.frame() %>%
+          filter(!is.na(Real) & !is.na(Observed) & Real == 1 & Observed == 1) %>%
+          st_as_sf(coords = c("x", "y"))
+        
+        # Add bioclimatic variables to the occurrence points
+        drops <- c("Real", "Observed")
+        initial_occ_bio_var <- terra::extract(mydata_sicilia, initial_occ) %>%
+          cbind(., initial_occ) %>%
+          na.omit() %>%
+          st_set_crs(4326) %>%
+          .[, !(names(.) %in% drops)]
+        
+        # Add distance data to the occurrence points
+        initial_occ_bio_var <- d_rast_sicilia %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rename the distance column
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+        
+        # Add suitability values to the occurrence points
+        initial_occ_bio_var <- random.sp$suitab.raster %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rename the suitability column
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+        
+        # Add sampling probability values to the occurrence points
+        initial_occ_bio_var <- prob_raster_sicilia %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rename the probability column
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+        
+        # Add columns for unbiased and biased data
+        initial_occ_bio_var <- initial_occ_bio_var %>%
+          mutate(
+            UNBIASED = TRUE, 
+            BIASED = probability == 1
+          )
+        
+        # Create a data frame from the occurrence coordinates
+        df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+        
+        # Add bioclimatic variables and remove the 'geometry' column
+        df <- cbind(df, initial_occ_bio_var[, !(names(initial_occ_bio_var) %in% c("geometry"))])
+        df$geometry <- NULL
+        
+        # Handle any missing (NA) values in the data frame
+        if (any(is.na(df))) {
+          cat(paste("NA found in species", species_created + 1, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file_sicilia, append = TRUE)
+          df[is.na(df)] <- 0  # Replace NA values with 0
+        }
+        
+        # Save the occurrence data as a CSV file
+        file_name <- paste0("species_", species_created + 1, "_sp_prevalence_", sp_prev, 
+                            "_sample_prev_0.9_n_occ_", n_occ, ".csv")
+        
+        file_path <- file.path(output_dir, file_name)
+        write.csv(df, file_path, row.names = FALSE)
+        
+        # Log the successful save of the species data
+        cat(paste("Species", species_created + 1, "for prevalence", sp_prev, "and occurrences", n_occ, "saved successfully to", file_path, "\n"), file = log_file_sicilia, append = TRUE)
+        
+        # Increment the counter for created species
+        species_created <- species_created + 1
+        
+        # Pause for half a second to avoid overloading the system
+        Sys.sleep(0.5)
+        
+      }, error = function(e) {
+        # Log any error that occurs during the species generation process
+        cat(paste("Error during generation of species", species_created + 1, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file_sicilia, append = TRUE)
+        cat("Error message:", e$message, "\n", file = log_file_sicilia, append = TRUE)
+      })
+      
+    } # End while loop for generating 5 virtual species
+    
+  } # End loop for different occurrence values
+  
+} # End loop for different prevalence values
+
+# Log final summary of species generation
+expected_species <- length(sp_prev_values) * length(n_occ_values) * n_species
+generated_species <- length(list.files(output_dir, pattern = "\\.csv$"))
+cat(paste("Expected:", expected_species, "Generated:", generated_species, "\n"), file = log_file_sicilia, append = TRUE)
+
+
+
+
+###################### LOMBARDIA ###################
+
+# Load the shapefile for the Lombardia region
+aoi_lombardia <- st_read("lombardia.shp") %>% .$geometry
+
+# Plot the region of Lombardia
+plot(aoi_lombardia)
+
+# Obtain the bounding box of the region
+lombardia_bb <- st_bbox(aoi_lombardia)
+
+# Define the type of road for OpenStreetMap (OSM) data (secondary roads)
+ht_secondary <- "secondary"
+
+# Download OSM data for the Lombardia region
+osm_lombardia <- oe_get("Lombardia", stringsAsFactors = FALSE, quiet = TRUE)
+osm_lombardia_roads <- osm_lombardia[osm_lombardia$highway %in% ht_secondary, ]
+
+# Load bioclimatic variables from WorldClim
+tmin <- worldclim_country("Ita", "tmin", path=tempdir(), res = 0.5, version = "2.1")
+tmax <- worldclim_country("Ita", "tmax", path=tempdir(), res = 0.5, version = "2.1")
+prec <- worldclim_country("Ita", "prec", path=tempdir(), res = 0.5, version = "2.1")
+
+# Select data for the first month
+tmin <- tmin$ITA_wc2.1_30s_tmin_1
+tmax <- tmax$ITA_wc2.1_30s_tmax_1
+prec <- prec$ITA_wc2.1_30s_prec_1
+
+# Create a stack of the raster layers (bioclimatic variables)
+r_list <- c(tmin, tmax, prec)
+mydata_lombardia <- raster::stack(r_list)
+
+# Crop and mask the raster stack based on the Lombardia region
+aoi_sp <- sf::as_Spatial(aoi_lombardia)
+mydata_lombardia <- mydata_lombardia %>% crop(., aoi_sp) %>% mask(., aoi_sp)
+
+# Rename the layers of the raster stack for clarity
+names(mydata_lombardia) <- c("Temperature Minimum", "Temperature Maximum", "Precipitation")
+
+# Plot the bioclimatic variables
+plot(mydata_lombardia$`Temperature.Minimum`, main = "Temperature Minimum", col = viridis::viridis(100))
+plot(mydata_lombardia$`Temperature.Maximum`, main = "Temperature Maximum", col = viridis::viridis(100))
+plot(mydata_lombardia$Precipitation, main = "Precipitation", col = viridis::viridis(100))
+
+# Convert the OSM roads to a spatial vector format
+roads_vect_lombardia <- terra::vect(osm_lombardia_roads$geometry)
+
+# Rasterize the roads vector to match the raster layers
+raster_roads_lombardia <- as(mydata_lombardia[[1]], "SpatRaster")
+r_lombardia <- terra::rasterize(roads_vect_lombardia, raster_roads_lombardia)
+d_lombardia <- distance(r_lombardia, unit = "km")
+
+# Generate a distance raster
+d_raster_lombardia <- d_lombardia %>% raster()
+
+# Calculate sampling probabilities based on the distance raster
+distances_lombardia <- d_raster_lombardia %>% as.data.frame()
+c <- 1
+sampling_prob_lombardia <- 1 - (((log(c * distances_lombardia)) / (log(max(c * distances_lombardia))))) %>% as.data.frame()
+
+# Adjust probabilities for values greater than 1 or infinite
+sampling_prob_lombardia[sampling_prob_lombardia == Inf] <- 1
+sampling_prob_lombardia[sampling_prob_lombardia > 1] <- 1
+
+# Classify the distance raster based on the calculated sampling probabilities
+prob_raster_lombardia <- classify(d_lombardia, cbind(values(d_lombardia), sampling_prob_lombardia))
+
+
+############### Graphing ################
+
+# Check if 'aoi_lombardia' is of type 'sf' or 'sfc', then convert it to a SpatVector
+if (inherits(aoi_lombardia, "sf") || inherits(aoi_lombardia, "sfc")) {
+  aoi_lombardia <- vect(aoi_lombardia)  # Convert to SpatVector
+}
+
+# Mask the distance raster to include only values within the Lombardia region
+d_rast_lombardia <- mask(d_lombardia, aoi_lombardia)
+
+# Plot the masked distance raster
+plot(d_rast_lombardia)
+
+# Mask the probability raster to include only the Lombardia region
+prob_raster_lombardia <- mask(prob_raster_lombardia, aoi_lombardia)
+
+# Convert the distance raster to a dataframe for ggplot visualization
+raster_df_dist_lombardia <- as.data.frame(d_rast_lombardia, xy = TRUE)
+
+# Define the value column for the distance raster
+value_column_dist_lombardia <- names(raster_df_dist_lombardia)[3]
+
+# Create the plot for the distance from roads using ggplot
+ggplot() +
+  geom_tile(data = raster_df_dist_lombardia, aes(x = x, y = y, fill = !!sym(value_column_dist_lombardia))) +
+  scale_fill_viridis_c(option = "D", alpha = 1, begin = 0, end = 1) +
+  geom_sf(data = osm_lombardia_roads$geometry, color = "black", size = 0.5) + 
+  theme_bw() +
+  theme_minimal() +
+  labs(title = "Distance from Roads (km)", fill = "Distance (km)") +
+  coord_sf() +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) +
+  scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +  # Format X axis labels
+  scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))   # Format Y axis labels
+
+
+# Calculate sampling probabilities based on the distance raster 
+distances_lombardia <- as.data.frame(d_rast_lombardia, xy = TRUE)
+
+# Define the constant 'c' (same as in your original code)
+c <- 1
+
+# Calculate sampling probability
+sampling_prob_lombardia <- 1 - (((log(c * distances_lombardia[, 3])) / (log(max(c * distances_lombardia[, 3])))))  # Probability based on distance
+
+# Ensure that values greater than 1 or infinite are handled correctly
+sampling_prob_lombardia[sampling_prob_lombardia == Inf] <- 1
+sampling_prob_lombardia[sampling_prob_lombardia > 1] <- 1
+
+# Add the sampling probability to the dataframe
+distances_lombardia$sampling_prob_lombardia <- sampling_prob_lombardia
+
+# Create the plot for sampling probabilities using ggplot
+ggplot() +
+  geom_tile(data = distances_lombardia, aes(x = x, y = y, fill = sampling_prob_lombardia)) +
+  scale_fill_viridis_c(option = "D", alpha = 1, begin = 0, end = 1) +
+  geom_sf(data = osm_lombardia_roads$geometry, color = "black", size = 0.5) + 
+  theme_bw() +
+  theme_minimal() +
+  labs(title = "Sampling Probability", fill = "Probability") +
+  coord_sf() +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) +
+  scale_x_continuous(labels = function(x) paste0(round(x, 1), "°E")) +  # Format X axis labels
+  scale_y_continuous(labels = function(y) paste0(round(y, 1), "°N"))   # Format Y axis labels
+
+
+############################# Virtual Species Generation ######################
+
+# Parameters for virtual species creation
+sample_prev <- 0.9   # Define sample prevalence
+n_species <- 5       # Number of species to generate
+
+# Combinations of species prevalence and occurrences
+sp_prev_values <- seq(0.05, 0.50, by = 0.05)
+n_occ_values <- c(600, 700, 800, 900, 1000)
+
+# Create a directory structure to save the output data
+main_dir <- "C:/tesi/specie_virtuali"
+sub_dir <- "lombardia"
+dir.create(main_dir, showWarnings = FALSE)
+dir.create(file.path(main_dir, sub_dir), showWarnings = FALSE)
+
+# Full path for output files
+output_dir <- file.path(main_dir, sub_dir)
+
+# Definition of the log file for Lombardia
+log_file_lombardia <- file.path(output_dir, "generation_log_lombardia.txt")
+cat("Start of virtual species generation for Lombardia\n", file = log_file_lombardia)
+
+# Loop through different prevalence values and occurrences for virtual species generation
+for (sp_prev in sp_prev_values) {
+  for (n_occ in n_occ_values) {
+    
+    # Log the start of a new combination
+    cat(paste("Starting generation for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file_lombardia, append = TRUE)
+    
+    species_created <- 0  # Counter for successfully created species
+    
+    # Generate up to 5 virtual species for each combination
+    while (species_created < n_species) {
+      
+      tryCatch({
+        # Generate the virtual species with the specified parameters
+        random.sp <- generateRandomSp(raster.stack = mydata_lombardia,
+                                      convert.to.PA = FALSE,
+                                      species.type = "multiplicative",
+                                      approach = "response",
+                                      relations = "gaussian",
+                                      realistic.sp = TRUE,
+                                      plot = FALSE)
+        
+        # Convert the species to presence-absence (PA) based on the given prevalence
+        new.pres <- convertToPA(random.sp,
+                                beta = "random",
+                                alpha = -0.05, 
+                                plot = FALSE,
+                                species.prevalence = sp_prev)
+        
+        # Sample random occurrences of the species
+        presence.points <- sampleOccurrences(new.pres,
+                                             n = n_occ,
+                                             type = "presence only",
+                                             sample.prevalence = sample_prev,
+                                             error.probability = 0,
+                                             detection.probability = 1,
+                                             correct.by.suitability = TRUE,
+                                             plot = FALSE)
+        
+        # Filter the sampled points to keep only the valid ones (Real == 1 and Observed == 1)
+        initial_occ <- presence.points$sample.points %>%
+          as.data.frame() %>%
+          filter(!is.na(Real) & !is.na(Observed) & Real == 1 & Observed == 1) %>%
+          st_as_sf(coords = c("x", "y"))
+        
+        # Add bioclimatic variables to the occurrence points
+        drops <- c("Real", "Observed")
+        initial_occ_bio_var <- terra::extract(mydata_lombardia, initial_occ) %>%
+          cbind(., initial_occ) %>%
+          na.omit() %>%
+          st_set_crs(4326) %>%
+          .[, !(names(.) %in% drops)]
+        
+        # Add distance data to the occurrence points
+        initial_occ_bio_var <- d_rast_lombardia %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rename the distance column
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "."] <- "distance"
+        
+        # Add suitability values to the occurrence points
+        initial_occ_bio_var <- random.sp$suitab.raster %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rename the suitability column
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "VSP.suitability"] <- "suitability"
+        
+        # Add sampling probability values to the occurrence points
+        initial_occ_bio_var <- prob_raster_lombardia %>%
+          terra::extract(., initial_occ_bio_var) %>%
+          cbind(initial_occ_bio_var, .)
+        
+        # Rename the probability column
+        names(initial_occ_bio_var)[names(initial_occ_bio_var) == "layer"] <- "probability"
+        
+        # Add columns for unbiased and biased data
+        initial_occ_bio_var <- initial_occ_bio_var %>%
+          mutate(
+            UNBIASED = TRUE, 
+            BIASED = probability == 1
+          )
+        
+        # Create a data frame from the occurrence coordinates
+        df <- as.data.frame(st_coordinates(initial_occ_bio_var))
+        
+        # Add bioclimatic variables and remove the 'geometry' column
+        df <- cbind(df, initial_occ_bio_var[, !(names(initial_occ_bio_var) %in% c("geometry"))])
+        df$geometry <- NULL
+        
+        # Handle any missing (NA) values in the data frame
+        if (any(is.na(df))) {
+          cat(paste("NA found in species", species_created + 1, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file_lombardia, append = TRUE)
+          df[is.na(df)] <- 0  # Replace NA values with 0
+        }
+        
+        # Save the occurrence data as a CSV file
+        file_name <- paste0("species_", species_created + 1, "_sp_prevalence_", sp_prev, 
+                            "_sample_prev_0.9_n_occ_", n_occ, ".csv")
+        
+        file_path <- file.path(output_dir, file_name)
+        write.csv(df, file_path, row.names = FALSE)
+        
+        # Log the successful save of the species data
+        cat(paste("Species", species_created + 1, "for prevalence", sp_prev, "and occurrences", n_occ, "saved successfully to", file_path, "\n"), file = log_file_lombardia, append = TRUE)
+        
+        # Increment the counter for created species
+        species_created <- species_created + 1
+        
+        # Pause for half a second to avoid overloading the system
+        Sys.sleep(0.5)
+        
+      }, error = function(e) {
+        # Log any error that occurs during the species generation process
+        cat(paste("Error during generation of species", species_created + 1, "for prevalence", sp_prev, "and occurrences", n_occ, "\n"), file = log_file_lombardia, append = TRUE)
+        cat("Error message:", e$message, "\n", file = log_file_lombardia, append = TRUE)
+      })
+      
+    } # End while loop for generating 5 virtual species
+    
+  } # End loop for different occurrence values
+  
+} # End loop for different prevalence values
+
+# Log final summary of species generation
+expected_species <- length(sp_prev_values) * length(n_occ_values) * n_species
+generated_species <- length(list.files(output_dir, pattern = "\\.csv$"))
+cat(paste("Expected:", expected_species, "Generated:", generated_species, "\n"), file = log_file_lombardia, append = TRUE)
+
+
+
+###################################### CREAZIONE CURVA DI ACCUMULAZIONE E CALCOLO INDICE D/I #######################
+
+
+
+#### Il pacchetto adehabitatMA (utilizzato implicitamente da altre librerie come ecospat) richiede almeno 5 occorrenze per calcolare un home range e quindi una densità climatica. 
+#### L'accumulo inizia da un minimo di 5 occorrenze, poiché sotto tale soglia il calcolo della griglia fallisce.
+
+
+# Caricamento delle librerie necessarie
+library(ecospat)
+library(raster)
+library(terra)
+library(sp)
+library(viridis)
+library(sf)
+library(markdown)
+library(rmarkdown)
+
+# Imposta la directory di lavoro
+setwd("C:/tesi")
+
+
+
+# Caricamento del dataset
+data <- read.csv("C:/tesi/Specie virtuali/SICILIA/species_1_sp_prevalence_0.1_sample_prev_0.9_n_occ_600.csv")
+
+# Separazione delle occorrenze biased e unbiased
+biased_data <- data[data$BIASED == TRUE, ]
+unbiased_data <- data[data$UNBIASED == TRUE, ]
+
+# PCA per estrarre le componenti principali delle variabili ambientali
+library(ade4)
+
+# Combinazione dei dati per la PCA
+all_env <- rbind(biased_data[, c("Temperature.Minimum", "Temperature.Maximum", "Precipitation")],
+                 unbiased_data[, c("Temperature.Minimum", "Temperature.Maximum", "Precipitation")])
+
+pca_clim <- dudi.pca(as.data.frame(all_env), center = TRUE, scale = TRUE, scannf = FALSE, nf = 2)
+
+# Funzione per calcolare D e I
+calcola_overlap <- function(biased_scores, unbiased_scores, global_scores) {
+  library(ecospat)
+  
+  # Creazione delle griglie di densità
+  biased_grid <- ecospat.grid.clim.dyn(global_scores, biased_scores, biased_scores)
+  unbiased_grid <- ecospat.grid.clim.dyn(global_scores, unbiased_scores, unbiased_scores)
+  
+  # Calcolo degli indici
+  overlap <- ecospat.niche.overlap(biased_grid, unbiased_grid, cor = TRUE)
+  list(D = overlap$D, I = overlap$I)
+}
+
+# Costruzione della curva di accumulazione
+num_occurrences <- seq(1, nrow(data), by = 1)
+risultati <- data.frame(Num.Occurrences = numeric(), D = numeric(), I = numeric())
+
+# Costruzione della curva di accumulazione
+num_occurrences <- seq(5, nrow(data), by = 1) # Inizia da 5 occorrenze
+risultati <- data.frame(Num.Occurrences = numeric(), D = numeric(), I = numeric())
+
+for (n in num_occurrences) {
+  # Selezione incrementale delle occorrenze
+  biased_subset <- biased_data[1:min(n, nrow(biased_data)), ]
+  unbiased_subset <- unbiased_data[1:min(n, nrow(unbiased_data)), ]
+  
+  # Controlla che ci siano almeno 5 occorrenze per ogni subset
+  if (nrow(biased_subset) >= 5 && nrow(unbiased_subset) >= 5) {
+    # PCA scores
+    biased_scores <- suprow(pca_clim, biased_subset[, c("Temperature.Minimum", "Temperature.Maximum", "Precipitation")])$li
+    unbiased_scores <- suprow(pca_clim, unbiased_subset[, c("Temperature.Minimum", "Temperature.Maximum", "Precipitation")])$li
+    global_scores <- pca_clim$li
+    
+    # Calcolo D e I
+    overlap <- calcola_overlap(biased_scores, unbiased_scores, global_scores)
+    
+    # Salvataggio dei risultati
+    risultati <- rbind(risultati, data.frame(Num.Occurrences = n, D = overlap$D, I = overlap$I))
+  }
+}
+
+# Salvataggio in un file CSV
+write.csv(risultati, "species_1_sp_prevalence_0.1_sample_prev_0.9_n_occ_600_accumulation_curve.csv", row.names = FALSE)
+
+# Visualizzazione dei risultati
+head(risultati)
+
+
+
+################################################# 
+#script con ciclo for per tutte le specie
+
+# Librerie necessarie
+library(ade4)
+library(ecospat)
+
+# Percorso della cartella principale
+main_dir <- "C:/tesi/Specie virtuali/SICILIA"
+output_dir <- file.path(main_dir, "Accumulation curve")
+
+# Creazione della cartella di output se non esiste
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Funzione per calcolare D e I
+calcola_overlap <- function(biased_scores, unbiased_scores, global_scores) {
+  # Creazione delle griglie di densità
+  biased_grid <- ecospat.grid.clim.dyn(global_scores, biased_scores, biased_scores)
+  unbiased_grid <- ecospat.grid.clim.dyn(global_scores, unbiased_scores, unbiased_scores)
+  
+  # Calcolo degli indici
+  overlap <- ecospat.niche.overlap(biased_grid, unbiased_grid, cor = TRUE)
+  list(D = overlap$D, I = overlap$I)
+}
+
+# Funzione per processare un singolo file
+process_file <- function(file_path) {
+  # Caricamento del dataset
+  data <- read.csv(file_path)
+  
+  # Separazione delle occorrenze biased e unbiased
+  biased_data <- data[data$BIASED == TRUE, ]
+  unbiased_data <- data[data$UNBIASED == TRUE, ]
+  
+  # PCA per estrarre le componenti principali delle variabili ambientali
+  all_env <- rbind(biased_data[, c("Temperature.Minimum", "Temperature.Maximum", "Precipitation")],
+                   unbiased_data[, c("Temperature.Minimum", "Temperature.Maximum", "Precipitation")])
+  
+  pca_clim <- dudi.pca(as.data.frame(all_env), center = TRUE, scale = TRUE, scannf = FALSE, nf = 2)
+  
+  # Costruzione della curva di accumulazione
+  num_occurrences <- seq(5, nrow(data), by = 1)
+  risultati <- data.frame(Num.Occurrences = numeric(), D = numeric(), I = numeric())
+  
+  for (n in num_occurrences) {
+    # Selezione incrementale delle occorrenze
+    biased_subset <- biased_data[1:min(n, nrow(biased_data)), ]
+    unbiased_subset <- unbiased_data[1:min(n, nrow(unbiased_data)), ]
+    
+    # PCA scores
+    biased_scores <- suprow(pca_clim, biased_subset[, c("Temperature.Minimum", "Temperature.Maximum", "Precipitation")])$li
+    unbiased_scores <- suprow(pca_clim, unbiased_subset[, c("Temperature.Minimum", "Temperature.Maximum", "Precipitation")])$li
+    global_scores <- pca_clim$li
+    
+    # Calcolo D e I
+    overlap <- calcola_overlap(biased_scores, unbiased_scores, global_scores)
+    
+    # Salvataggio dei risultati
+    risultati <- rbind(risultati, data.frame(Num.Occurrences = n, D = overlap$D, I = overlap$I))
+  }
+  
+  # Salvataggio in un file CSV
+  file_name <- basename(file_path)
+  output_file <- file.path(output_dir, sub(".csv$", "_accumulation_curve.csv", file_name))
+  write.csv(risultati, output_file, row.names = FALSE)
+  
+  cat("Curva di accumulazione salvata per:", file_name, "\n")
+}
+
+# Elaborazione di tutti i file nella cartella
+files <- list.files(main_dir, pattern = "^species_\\d+_sp_prevalence_.*\\.csv$", full.names = TRUE)
+
+for (file_path in files) {
+  process_file(file_path)
+}
+
+
+##################################### VISUALIZZAZIONE CURVA DI ACCUMULAZIONE DI UNA SPECIE ESEMPIO ########################
+
+#1. Schöner’s D Index
+#Descrizione: Misura la sovrapposizione basata sulle differenze nella densità di occorrenza di una specie in diverse condizioni ambientali o spaziali.
+#Intervallo: Va da 0 a 1.
+#0: Nessuna sovrapposizione tra le nicchie.
+#1: Sovrapposizione totale tra le nicchie.
+
+
+#2. Indice di Hellinger (I)
+#Descrizione: Misura la somiglianza tra le distribuzioni di probabilità delle due specie nello spazio delle nicchie, utilizzando un approccio basato sulla distanza di Hellinger.
+#Intervallo: Anche questo va da 0 a 1.
+#0: Nessuna somiglianza tra le distribuzioni.
+#1: Distribuzioni identiche.
+
+
+#D: Misura quanto sono diverse le nicchie in termini di distribuzione globale delle densità. Più robusto e adatto per confronti generali.
+#I: Misura quanto sono simili le nicchie, enfatizzando la somiglianza anche in aree a bassa densità. Più dettagliato per analisi sottili.
+
+
+# Carica le librerie necessarie
+library(ggplot2)
+library(readr)
+
+# Carica il file CSV
+file_path <- "C:/tesi/Specie virtuali/SICILIA/Accumulation curve/species_1_sp_prevalence_0.35_sample_prev_0.9_n_occ_800_accumulation_curve.csv"
+data <- read.csv(file_path)
+
+# Visualizza le prime righe del dataframe per assicurarsi che i dati siano corretti
+head(data)
+
+# Crea il grafico 
+plot <- ggplot() +
+  # Aggiungi i punti per D con colore pastello
+  geom_point(data = data, aes(x = `Num.Occurrences`, y = D), color = "#AEC6CF", size = 2) +
+  # Aggiungi i punti per I con colore pastello
+  geom_point(data = data, aes(x = `Num.Occurrences`, y = I), color = "#FFB6C1", size = 2) +
+  # Aggiungi la curva di tendenza LOESS per D 
+  geom_smooth(data = data, aes(x = `Num.Occurrences`, y = D), 
+              method = "loess", se = FALSE, color = "#779ECB", size = 1, linetype = "solid") +
+  # Aggiungi la curva di tendenza LOESS per I 
+  geom_smooth(data = data, aes(x = `Num.Occurrences`, y = I), 
+              method = "loess", se = FALSE, color = "#FF9999", size = 1, linetype = "solid") +
+  # Etichette e titolo
+  labs(title = "D/I - Curva di Accumulazione",
+       x = "Numero di Occorrenze",
+       y = "Valore",
+       color = "Curva") +
+  # Tema minimale
+  theme_minimal()
+
+# Visualizza il grafico
+print(plot)
+
+
+######################################## VISUALIZZAZIONE METODO ECOSPAT SU UNA SPECIE ESEMPIO ################################# 
+
+#Ho suddiviso il file in subset ogni 200 occorrenze, a partire da 48 dove il valore D è massimo 
+
+
+
+# Caricamento delle librerie necessarie
+library(ecospat)
+library(raster)
+library(terra)
+library(sp)
+library(viridis)
+library(sf)
+library(markdown)
+library(rmarkdown)
+library(geodata)
+library(ade4)
+
+# Imposta la directory di lavoro
+setwd("C:/tesi")
+
+# Lista dei file
+files <- c("Sp1_0.35_800_D249449", "Sp1_0.35_800_D450650", "Sp1_0.35_800_Dmax", "Sp1_0.35_800_Dfinale")
+
+# Caricamento shapefile della Sicilia
+aoi_sicilia <- st_read("C:/tesi/Sicilia.shp")  # Carica il tuo shapefile della Sicilia
+
+# Bounding box per delimitare l'area di studio
+sicilia_bb <- st_bbox(aoi_sicilia)
+
+# Variabili bioclimatiche dal WorldClim
+tmin <- worldclim_country("Ita", "tmin", path = tempdir(), res = 0.5, version = "2.1")
+tmax <- worldclim_country("Ita", "tmax", path = tempdir(), res = 0.5, version = "2.1")
+prec <- worldclim_country("Ita", "prec", path = tempdir(), res = 0.5, version = "2.1")
+
+# Selezione del primo mese
+tmin <- tmin$ITA_wc2.1_30s_tmin_1
+tmax <- tmax$ITA_wc2.1_30s_tmax_1
+prec <- prec$ITA_wc2.1_30s_prec_1
+
+# Creazione di uno stack raster
+r_list <- c(tmin, tmax, prec)
+mydata <- raster::stack(r_list)
+
+# Crop e mask dei raster per l'area della Sicilia
+aoi_sp <- sf::as_Spatial(aoi_sicilia)
+mydata_sicilia <- mydata %>% crop(., aoi_sp) %>% mask(., aoi_sp)
+
+# Rinomina i layer nel raster stack
+names(mydata_sicilia) <- c("Temperature Minimum", "Temperature Maximum", "Precipitation")
+
+# Creazione della griglia geografica (adatta per la Sicilia)
+geoGrid <- expand.grid(longitude = seq(11.92587, 15.65330, length.out = 250),  # Modifica questi valori per la tua area geografica
+                       latitude = seq(35.49345, 38.81213, length.out = 250))  # Modifica questi valori per la tua area geografica
+
+# Converti il SpatialPolygonsDataFrame della Sicilia in un oggetto SpatVector
+mask_spat <- vect(aoi_sicilia)
+
+
+# Iterazione sui file
+for (file in files) {
+  # Costruzione del percorso completo al file CSV
+  filepath <- paste0("C:/tesi/Specie virtuali/SICILIA/grafici/", file, ".csv")
+  
+  data_specie <- read.csv(filepath, sep = ";")  # se il separatore è punto e virgola
+  
+  data_biased <- subset(data_specie, BIASED == TRUE)
+  data_unbiased <- subset(data_specie, UNBIASED == TRUE)
+  
+  # Rimuovi valori NA dalle coordinate (se presenti)
+  data_biased <- data_biased[complete.cases(data_biased), ]
+  data_unbiased <- data_unbiased[complete.cases(data_unbiased), ]
+  
+  # Conversione in oggetti spaziali
+  coordinates(data_biased) <- c("X", "Y")
+  proj4string(data_biased) <- CRS("+proj=longlat +datum=WGS84")
+  
+  coordinates(data_unbiased) <- c("X", "Y")
+  proj4string(data_unbiased) <- CRS("+proj=longlat +datum=WGS84")
+  
+  # Creazione del grafico per le occorrenze Biased e Unbiased separati
+  pdf(paste0("C:/tesi/Specie virtuali/SICILIA/grafici/", file, "_occurrences_map.pdf"))
+  
+  # Visualizzazione delle occorrenze biased e unbiased in due grafici separati
+  par(mfrow = c(1, 2))  # Organizza i grafici su due colonne
+  
+  # Plot delle occorrenze Biased
+  plot(aoi_sp, main = paste("Occorrenze Biased -", file), border = "black", xlab = "", ylab = "", xaxt = "n", yaxt = "n")
+  axis(1)
+  axis(2)
+  points(data_biased, col = "red", pch = 16, cex = 0.5)  # Plotta le occorrenze biased
+  box()
+  
+  # Plot delle occorrenze Unbiased
+  plot(aoi_sp, main = paste("Occorrenze Unbiased -", file), border = "black", xlab = "", ylab = "", xaxt = "n", yaxt = "n")
+  axis(1)
+  axis(2)
+  points(data_unbiased, col = "blue", pch = 16, cex = 0.5)  # Plotta le occorrenze unbiased
+  box()
+  
+  dev.off()  # Chiudi il file PDF
+  
+  # Pre-analisi
+  biased_env <- raster::extract(mydata_sicilia, data_biased)
+  unbiased_env <- raster::extract(mydata_sicilia, data_unbiased)
+  
+  # Rimuovere valori NA
+  biased_env <- biased_env[complete.cases(biased_env), ]
+  unbiased_env <- unbiased_env[complete.cases(unbiased_env), ]
+  
+  # Statistiche di base
+  biased_stats <- apply(biased_env, 2, function(x) c(min = min(x, na.rm = TRUE), median = median(x, na.rm = TRUE), mean = mean(x, na.rm = TRUE), max = max(x, na.rm = TRUE), sd = sd(x, na.rm = TRUE)))
+  unbiased_stats <- apply(unbiased_env, 2, function(x) c(min = min(x, na.rm = TRUE), median = median(x, na.rm = TRUE), mean = mean(x, na.rm = TRUE), max = max(x, na.rm = TRUE), sd = sd(x, na.rm = TRUE)))
+  
+  bioStats <- rbind(biased_stats, unbiased_stats)
+  print(head(bioStats))
+  
+  # Mantel correlogram
+  mantel_pdf_path <- paste0("C:/tesi/Specie virtuali/SICILIA/grafici/", file, "_mantel_correlogram.pdf")
+  pdf(mantel_pdf_path)  # Salva il grafico Mantel correlogramma in PDF
+  
+  ecospat.mantel.correlogram(dfvar = biased_env, colxy = 1:2, n = 100, colvar = 1:3, max = 5, nclass = 10, nperm = 100)
+  ecospat.mantel.correlogram(dfvar = unbiased_env, colxy = 1:2, n = 100, colvar = 1:3, max = 5, nclass = 10, nperm = 100)
+  
+  dev.off()  # Chiudi il file PDF
+  
+  # PCA per il confronto
+  all_env <- rbind(biased_env, unbiased_env)
+  pca_clim <- dudi.pca(as.data.frame(all_env), center = TRUE, scale = TRUE, scannf = FALSE, nf = 2)
+  
+  global_scores <- pca_clim$li
+  biased_scores <- suprow(pca_clim, biased_env)$li
+  unbiased_scores <- suprow(pca_clim, unbiased_env)$li
+  
+  biased_grid <- ecospat.grid.clim.dyn(global_scores, biased_scores, biased_scores)
+  unbiased_grid <- ecospat.grid.clim.dyn(global_scores, unbiased_scores, unbiased_scores)
+  
+  # Salvataggio del grafico per l'overlap delle nicchie (senza la Sicilia)
+  niche_overlap_pdf_path <- paste0("C:/tesi/Specie virtuali/SICILIA/grafici/", file, "_niche_overlap.pdf")
+  pdf(niche_overlap_pdf_path)  # Salva il grafico Niche Overlap in PDF
+  
+  ecospat.plot.niche.dyn(biased_grid, unbiased_grid, quant = 0.1, interest = 2, 
+                         title = paste("Niche Overlap -", file), name.axis1 = "PC1", name.axis2 = "PC2")
+  
+  dev.off()  # Chiudi il file PDF
+  
+  # Creazione della griglia climatica dinamica (biased)
+  biasedGeoGrid <- ecospat.grid.clim.dyn(geoGrid, geoGrid,
+                                         coordinates(data_biased),  # Usa le coordinate delle occorrenze biased
+                                         geomask = mask_spat)  # Usa la maschera geografica della Sicilia
+  
+  # Creazione della griglia climatica dinamica (unbiased)
+  unbiasedGeoGrid <- ecospat.grid.clim.dyn(geoGrid, geoGrid,
+                                           coordinates(data_unbiased),  # Usa le coordinate delle occorrenze unbiased
+                                           geomask = mask_spat)  # Usa la maschera geografica della Sicilia
+  
+  # Plot delle nicchie dinamiche 
+  niche_dynamic_pdf_path <- paste0("C:/tesi/Specie virtuali/SICILIA/grafici/", file, "_niche_dynamic.pdf")
+  pdf(niche_dynamic_pdf_path)  # Salva il grafico Niche Dynamic in PDF
+  
+  ecospat.plot.niche.dyn(biasedGeoGrid, unbiasedGeoGrid, quant = 0)
+  plot(aoi_sicilia$geometry, add = TRUE)  # Sovrapponi lo shapefile della Sicilia
+  
+  dev.off()  # Chiudi il file PDF
+  
+  dynamic_index <- ecospat.niche.dyn.index(biasedGeoGrid, unbiasedGeoGrid, intersection = 0.1)$dynamic.index.w
+  print(paste("Dynamic Index for", file, ":", dynamic_index))
+}
+
+
+
+
+################################### CALCOLO DELTA D E BIASED RATIO ############################## 
+
+
+
+
+library(dplyr)
+library(stringr)
+library(readr)
+
+
+#SICILIA#
+################################ Una specie calcolo Delta
+
+
+# Percorso al file specifico
+file_path <- "C:/tesi/Specie virtuali/SICILIA/Accumulation curve/species_1_sp_prevalence_0.1_sample_prev_0.9_n_occ_600_accumulation_curve.csv"
+
+# Carica il file
+data <- read.csv(file_path)
+
+# Estrai valori
+D_max <- max(data$D, na.rm = TRUE)
+I_max <- max(data$I, na.rm = TRUE)
+D_final <- tail(data$D, n = 1)
+I_final <- tail(data$I, n = 1)
+Delta_D <- D_max - D_final
+
+# Estrai informazioni dal nome del file
+file_info <- strsplit(basename(file_path), "_")[[1]]
+species <- file_info[2]
+sp_prevalence <- as.numeric(file_info[5])  # Prevalence è nella posizione 5
+n_occ <- as.numeric(file_info[11])        # Occorrenze nella posizione 11
+
+# Crea un data frame con i risultati
+results <- data.frame(
+  Species = species,
+  SpeciesPrevalence = sp_prevalence,
+  Dmax = D_max,
+  Dfinal = D_final,
+  DeltaD = Delta_D
+)
+
+# Costruisci il percorso della cartella dei risultati
+results_dir <- "C:/tesi/Specie virtuali/SICILIA/Accumulation curve/results"
+if (!dir.exists(results_dir)) {
+  dir.create(results_dir)
+}
+
+# Costruisci il nome del file di output nella cartella results
+output_file <- paste0(
+  results_dir, "/",
+  gsub("\\.csv$", "", basename(file_path)),
+  "_results.csv"
+)
+
+# Salva i risultati in un file CSV
+write.csv(results, output_file, row.names = FALSE)
+
+
+
+
+
+########################### tutte le specie calcolo Delta
+
+
+# Percorso alla cartella contenente i file CSV
+folder_path <- "C:/tesi/Specie virtuali/SICILIA/Accumulation curve"
+
+# Elenco di tutti i file CSV nella cartella
+csv_files <- list.files(path = folder_path, pattern = "*.csv", full.names = TRUE)
+
+# Inizializza una lista per raccogliere i risultati
+all_results <- list()
+
+# Ciclo su ogni file CSV
+for (file_path in csv_files) {
+  
+  # Carica i dati
+  data <- read.csv(file_path)
+  
+  # Estrai i valori richiesti
+  D_max <- max(data$D, na.rm = TRUE)
+  D_final <- tail(data$D, n = 1)
+  Delta_D <- D_max - D_final
+  
+  # Estrai informazioni dal nome del file
+  file_info <- strsplit(basename(file_path), "_")[[1]]
+  species <- file_info[2]                # Specie è nella posizione 2
+  sp_prevalence <- as.numeric(file_info[5])  # Prevalence è nella posizione 5
+  n_occ <- as.numeric(file_info[11])        # Occorrenze nella posizione 11
+  
+  # Crea un data frame con i risultati per questo file
+  results <- data.frame(
+    Species = species,
+    SpeciesPrevalence = sp_prevalence,
+    N_Occurrences = n_occ,
+    Dmax = D_max,
+    Dfinal = D_final,
+    DeltaD = Delta_D
+  )
+  
+  # Aggiungi i risultati alla lista
+  all_results[[length(all_results) + 1]] <- results
+}
+
+# Unisci tutti i risultati in un unico data frame
+final_results <- bind_rows(all_results)
+
+# Percorso alla cartella dei risultati
+results_dir <- "C:/tesi/Specie virtuali/SICILIA/Accumulation curve/results"
+if (!dir.exists(results_dir)) {
+  dir.create(results_dir)
+}
+
+# Nome del file di output
+output_file <- paste0(results_dir, "/all_species_results.csv")
+
+# Salva i risultati in un file CSV
+write.csv(final_results, output_file, row.names = FALSE)
+
+# Messaggio di conferma
+cat("Risultati salvati in:", output_file, "\n")
+
+
+################################################################## rapporto occorrenze biased/tot
+
+
+# Percorso alla cartella contenente i file CSV
+folder_path <- "C:/tesi/Specie virtuali/SICILIA"
+
+# Elenco di tutti i file CSV nella cartella
+csv_files <- list.files(path = folder_path, pattern = "*.csv", full.names = TRUE)
+
+# Inizializza una lista per raccogliere i risultati
+all_results <- list()
+
+# Ciclo su ogni file CSV
+for (file_path in csv_files) {
+  
+  # Carica i dati
+  data <- read.csv(file_path)
+  
+  # Verifica se le colonne 'BIASED' e 'UNBIASED' esistono
+  if (!("BIASED" %in% colnames(data)) | !("UNBIASED" %in% colnames(data))) {
+    cat("File ignorato (colonne 'BIASED' o 'UNBIASED' mancanti):", basename(file_path), "\n")
+    next  # Se non ci sono, passa al prossimo file
+  }
+  
+  # Calcola il numero totale di occorrenze e quelle biased
+  total_occurrences <- nrow(data)
+  biased_occurrences <- sum(data$BIASED == TRUE, na.rm = TRUE)
+  
+  # Estrai informazioni dal nome del file
+  file_info <- strsplit(basename(file_path), "_")[[1]]
+  species <- file_info[2]                # Specie è nella posizione 2
+  sp_prevalence <- as.numeric(file_info[5])  # Prevalence è nella posizione 5
+  
+  # Estrai il numero di occorrenze dal nome del file (ad esempio "n_occ_700")
+  n_occ <- as.numeric(str_extract(file_info[11], "\\d+"))  # Estrae il numero dopo "n_occ_"
+  
+  # Calcola il rapporto n. occorrenze biased / n. occorrenze totali
+  biased_ratio <- biased_occurrences / total_occurrences
+  
+  # Crea un data frame con i risultati per questo file
+  results <- data.frame(
+    Species = species,
+    SpeciesPrevalence = sp_prevalence,
+    N_Occurrences = n_occ,
+    BiasedRatio = biased_ratio
+  )
+  
+  # Aggiungi i risultati alla lista
+  all_results[[length(all_results) + 1]] <- results
+}
+
+# Se ci sono risultati, unisci tutti i dati
+if (length(all_results) > 0) {
+  final_results <- bind_rows(all_results)
+  
+  # Percorso alla cartella dei risultati
+  results_dir <- "C:/tesi/Specie virtuali/SICILIA/results"
+  if (!dir.exists(results_dir)) {
+    dir.create(results_dir)
+  }
+  
+  # Nome del file di output
+  output_file <- paste0(results_dir, "/all_species_biased_ratio.csv")
+  
+  # Salva i risultati in un file CSV
+  write.csv(final_results, output_file, row.names = FALSE)
+  cat("Risultati salvati in:", output_file, "\n")
+} else {
+  cat("Nessun risultato valido trovato. Verifica i dati.\n")
+}
+
+
+
+
+############################### risultati in un unico file csv sia biased ratio che delta D 
+
+
+# Percorso alla cartella contenente i file CSV per il primo calcolo (Accumulation Curve)
+folder_path_1 <- "C:/tesi/Specie virtuali/SICILIA/Accumulation curve"
+
+# Elenco di tutti i file CSV nella cartella per il primo calcolo
+csv_files_1 <- list.files(path = folder_path_1, pattern = "*.csv", full.names = TRUE)
+
+# Inizializza una lista per raccogliere i risultati dal primo script
+accumulation_results <- list()
+
+# Ciclo su ogni file CSV per il primo calcolo (Accumulation Curve)
+for (file_path in csv_files_1) {
+  
+  # Carica i dati
+  data <- read.csv(file_path)
+  
+  # Estrai i valori richiesti
+  D_max <- max(data$D, na.rm = TRUE)
+  D_final <- tail(data$D, n = 1)
+  Delta_D <- D_max - D_final
+  
+  # Estrai informazioni dal nome del file
+  file_info <- strsplit(basename(file_path), "_")[[1]]
+  species <- file_info[2]                # Specie è nella posizione 2
+  sp_prevalence <- as.numeric(file_info[5])  # Prevalence è nella posizione 5
+  n_occ <- as.numeric(file_info[11])        # Occorrenze nella posizione 11
+  
+  # Crea un data frame con i risultati per questo file
+  results <- data.frame(
+    Species = species,
+    SpeciesPrevalence = sp_prevalence,
+    N_Occurrences = n_occ,
+    Dmax = D_max,
+    Dfinal = D_final,
+    DeltaD = Delta_D
+  )
+  
+  # Aggiungi i risultati alla lista
+  accumulation_results[[length(accumulation_results) + 1]] <- results
+}
+
+# Unisci tutti i risultati in un unico data frame
+accumulation_final_results <- bind_rows(accumulation_results)
+
+# Percorso alla cartella contenente i file CSV per il secondo calcolo (Biased Ratio)
+folder_path_2 <- "C:/tesi/Specie virtuali/SICILIA"
+
+# Elenco di tutti i file CSV nella cartella per il secondo calcolo
+csv_files_2 <- list.files(path = folder_path_2, pattern = "*.csv", full.names = TRUE)
+
+# Inizializza una lista per raccogliere i risultati dal secondo script (Biased Ratio)
+biased_results <- list()
+
+# Ciclo su ogni file CSV per il secondo calcolo (Biased Ratio)
+for (file_path in csv_files_2) {
+  
+  # Carica i dati
+  data <- read.csv(file_path)
+  
+  # Verifica se le colonne 'BIASED' e 'UNBIASED' esistono
+  if (!("BIASED" %in% colnames(data)) | !("UNBIASED" %in% colnames(data))) {
+    cat("File ignorato (colonne 'BIASED' o 'UNBIASED' mancanti):", basename(file_path), "\n")
+    next  # Se non ci sono, passa al prossimo file
+  }
+  
+  # Calcola il numero totale di occorrenze e quelle biased
+  total_occurrences <- nrow(data)
+  biased_occurrences <- sum(data$BIASED == TRUE, na.rm = TRUE)
+  
+  # Estrai informazioni dal nome del file
+  file_info <- strsplit(basename(file_path), "_")[[1]]
+  species <- file_info[2]                # Specie è nella posizione 2
+  sp_prevalence <- as.numeric(file_info[5])  # Prevalence è nella posizione 5
+  
+  # Estrai il numero di occorrenze dal nome del file (ad esempio "n_occ_700")
+  n_occ <- as.numeric(str_extract(file_info[11], "\\d+"))  # Estrae il numero dopo "n_occ_"
+  
+  # Calcola il rapporto n. occorrenze biased / n. occorrenze totali
+  biased_ratio <- biased_occurrences / total_occurrences
+  
+  # Crea un data frame con i risultati per questo file
+  results <- data.frame(
+    Species = species,
+    SpeciesPrevalence = sp_prevalence,
+    N_Occurrences = n_occ,
+    BiasedRatio = biased_ratio
+  )
+  
+  # Aggiungi i risultati alla lista
+  biased_results[[length(biased_results) + 1]] <- results
+}
+
+# Unisci tutti i risultati in un unico data frame per il secondo calcolo (Biased Ratio)
+biased_final_results <- bind_rows(biased_results)
+
+# Unisci i due data frame (accumulation_final_results e biased_final_results) basato su "Species" e "SpeciesPrevalence"
+final_combined_results <- left_join(accumulation_final_results, biased_final_results, by = c("Species", "SpeciesPrevalence", "N_Occurrences"))
+
+# Percorso alla cartella dei risultati unificati
+results_dir <- "C:/tesi/Specie virtuali/SICILIA/results"
+if (!dir.exists(results_dir)) {
+  dir.create(results_dir)
+}
+
+# Nome del file di output unificato
+output_file <- paste0(results_dir, "/all_species_combined_results.csv")
+
+# Salva i risultati unificati in un file CSV
+write.csv(final_combined_results, output_file, row.names = FALSE)
+
+# Messaggio di conferma
+cat("Risultati unificati salvati in:", output_file, "\n")
+
+
+##################################### GRAFICO 
+
+library(ggplot2)
+library(viridis)
+library(readr)
+
+# Carica i dati dal file CSV creato precedentemente
+file_path <- "C:/tesi/Specie virtuali/SICILIA/results/all_species_combined_results.csv"
+data <- read.csv(file_path)
+
+# Creazione del grafico con linea di tendenza rossa e correzione per il warning
+ggplot(data, aes(x = BiasedRatio, y = DeltaD, color = SpeciesPrevalence)) +
+  geom_point(size = 3) +  # Aggiungi i punti
+  scale_color_viridis(option = "D") +  # Utilizza la gradazione di colore viridis per il `SpeciesPrevalence`
+  labs(
+    title = "Biased Ratio vs DeltaD",
+    x = "Biased Ratio",
+    y = "DeltaD",
+    color = "Species Prevalence"
+  ) +
+  theme_minimal()  # Tema minimale per il grafico
+
+
+
+#LOMBARDIA#
+library(dplyr)
+library(stringr)
+library(readr)
+
+################################ Una specie calcolo Delta
+
+# Percorso al file specifico
+file_path <- "C:/tesi/Specie virtuali/LOMBARDIA/Accumulation curve/species_1_sp_prevalence_0.1_sample_prev_0.9_n_occ_600_accumulation_curve.csv"
+
+# Carica il file
+data <- read.csv(file_path)
+
+# Estrai valori
+D_max <- max(data$D, na.rm = TRUE)
+I_max <- max(data$I, na.rm = TRUE)
+D_final <- tail(data$D, n = 1)
+I_final <- tail(data$I, n = 1)
+Delta_D <- D_max - D_final
+
+# Estrai informazioni dal nome del file
+file_info <- strsplit(basename(file_path), "_")[[1]]
+species <- file_info[2]
+sp_prevalence <- as.numeric(file_info[5])  # Prevalence è nella posizione 5
+n_occ <- as.numeric(file_info[11])        # Occorrenze nella posizione 11
+
+# Crea un data frame con i risultati
+results <- data.frame(
+  Species = species,
+  SpeciesPrevalence = sp_prevalence,
+  Dmax = D_max,
+  Dfinal = D_final,
+  DeltaD = Delta_D
+)
+
+# Costruisci il percorso della cartella dei risultati
+results_dir <- "C:/tesi/Specie virtuali/LOMBARDIA/Accumulation curve/results"
+if (!dir.exists(results_dir)) {
+  dir.create(results_dir)
+}
+
+# Costruisci il nome del file di output nella cartella results
+output_file <- paste0(
+  results_dir, "/",
+  gsub("\\.csv$", "", basename(file_path)),
+  "_results.csv"
+)
+
+# Salva i risultati in un file CSV
+write.csv(results, output_file, row.names = FALSE)
+
+########################### tutte le specie calcolo Delta
+
+# Percorso alla cartella contenente i file CSV
+folder_path <- "C:/tesi/Specie virtuali/LOMBARDIA/Accumulation curve"
+
+# Elenco di tutti i file CSV nella cartella
+csv_files <- list.files(path = folder_path, pattern = "*.csv", full.names = TRUE)
+
+# Inizializza una lista per raccogliere i risultati
+all_results <- list()
+
+# Ciclo su ogni file CSV
+for (file_path in csv_files) {
+  
+  # Carica i dati
+  data <- read.csv(file_path)
+  
+  # Estrai i valori richiesti
+  D_max <- max(data$D, na.rm = TRUE)
+  D_final <- tail(data$D, n = 1)
+  Delta_D <- D_max - D_final
+  
+  # Estrai informazioni dal nome del file
+  file_info <- strsplit(basename(file_path), "_")[[1]]
+  species <- file_info[2]                # Specie è nella posizione 2
+  sp_prevalence <- as.numeric(file_info[5])  # Prevalence è nella posizione 5
+  n_occ <- as.numeric(file_info[11])        # Occorrenze nella posizione 11
+  
+  # Crea un data frame con i risultati per questo file
+  results <- data.frame(
+    Species = species,
+    SpeciesPrevalence = sp_prevalence,
+    N_Occurrences = n_occ,
+    Dmax = D_max,
+    Dfinal = D_final,
+    DeltaD = Delta_D
+  )
+  
+  # Aggiungi i risultati alla lista
+  all_results[[length(all_results) + 1]] <- results
+}
+
+# Unisci tutti i risultati in un unico data frame
+final_results <- bind_rows(all_results)
+
+# Percorso alla cartella dei risultati
+results_dir <- "C:/tesi/Specie virtuali/LOMBARDIA/Accumulation curve/results"
+if (!dir.exists(results_dir)) {
+  dir.create(results_dir)
+}
+
+# Nome del file di output
+output_file <- paste0(results_dir, "/all_species_results_LOMBARDIA.csv")
+
+# Salva i risultati in un file CSV
+write.csv(final_results, output_file, row.names = FALSE)
+
+# Messaggio di conferma
+cat("Risultati salvati in:", output_file, "\n")
+
+################################################################## rapporto occorrenze biased/tot
+
+# Percorso alla cartella contenente i file CSV
+folder_path <- "C:/tesi/Specie virtuali/LOMBARDIA"
+
+# Elenco di tutti i file CSV nella cartella
+csv_files <- list.files(path = folder_path, pattern = "*.csv", full.names = TRUE)
+
+# Inizializza una lista per raccogliere i risultati
+all_results <- list()
+
+# Ciclo su ogni file CSV
+for (file_path in csv_files) {
+  
+  # Carica i dati
+  data <- read.csv(file_path)
+  
+  # Verifica se le colonne 'BIASED' e 'UNBIASED' esistono
+  if (!("BIASED" %in% colnames(data)) | !("UNBIASED" %in% colnames(data))) {
+    cat("File ignorato (colonne 'BIASED' o 'UNBIASED' mancanti):", basename(file_path), "\n")
+    next  # Se non ci sono, passa al prossimo file
+  }
+  
+  # Calcola il numero totale di occorrenze e quelle biased
+  total_occurrences <- nrow(data)
+  biased_occurrences <- sum(data$BIASED == TRUE, na.rm = TRUE)
+  
+  # Estrai informazioni dal nome del file
+  file_info <- strsplit(basename(file_path), "_")[[1]]
+  species <- file_info[2]                # Specie è nella posizione 2
+  sp_prevalence <- as.numeric(file_info[5])  # Prevalence è nella posizione 5
+  
+  # Estrai il numero di occorrenze dal nome del file (ad esempio "n_occ_700")
+  n_occ <- as.numeric(str_extract(file_info[11], "\\d+"))  # Estrae il numero dopo "n_occ_"
+  
+  # Calcola il rapporto n. occorrenze biased / n. occorrenze totali
+  biased_ratio <- biased_occurrences / total_occurrences
+  
+  # Crea un data frame con i risultati per questo file
+  results <- data.frame(
+    Species = species,
+    SpeciesPrevalence = sp_prevalence,
+    N_Occurrences = n_occ,
+    BiasedRatio = biased_ratio
+  )
+  
+  # Aggiungi i risultati alla lista
+  all_results[[length(all_results) + 1]] <- results
+}
+
+# Se ci sono risultati, unisci tutti i dati
+if (length(all_results) > 0) {
+  final_results <- bind_rows(all_results)
+  
+  # Percorso alla cartella dei risultati
+  results_dir <- "C:/tesi/Specie virtuali/LOMBARDIA/results"
+  if (!dir.exists(results_dir)) {
+    dir.create(results_dir)
+  }
+  
+  # Nome del file di output
+  output_file <- paste0(results_dir, "/all_species_biased_ratio_LOMBARDIA.csv")
+  
+  # Salva i risultati in un file CSV
+  write.csv(final_results, output_file, row.names = FALSE)
+  cat("Risultati salvati in:", output_file, "\n")
+} else {
+  cat("Nessun risultato valido trovato. Verifica i dati.\n")
+}
+
+############################### risultati in un unico file csv sia biased ratio che delta D 
+
+# Percorso alla cartella contenente i file CSV per il primo calcolo (Accumulation Curve)
+folder_path_1 <- "C:/tesi/Specie virtuali/LOMBARDIA/Accumulation curve"
+
+# Elenco di tutti i file CSV nella cartella per il primo calcolo
+csv_files_1 <- list.files(path = folder_path_1, pattern = "*.csv", full.names = TRUE)
+
+# Inizializza una lista per raccogliere i risultati dal primo script
+accumulation_results <- list()
+
+# Ciclo su ogni file CSV per il primo calcolo (Accumulation Curve)
+for (file_path in csv_files_1) {
+  
+  # Carica i dati
+  data <- read.csv(file_path)
+  
+  # Estrai i valori richiesti
+  D_max <- max(data$D, na.rm = TRUE)
+  D_final <- tail(data$D, n = 1)
+  Delta_D <- D_max - D_final
+  
+  # Estrai informazioni dal nome del file
+  file_info <- strsplit(basename(file_path), "_")[[1]]
+  species <- file_info[2]                # Specie è nella posizione 2
+  sp_prevalence <- as.numeric(file_info[5])  # Prevalence è nella posizione 5
+  n_occ <- as.numeric(file_info[11])        # Occorrenze nella posizione 11
+  
+  # Crea un data frame con i risultati per questo file
+  results <- data.frame(
+    Species = species,
+    SpeciesPrevalence = sp_prevalence,
+    N_Occurrences = n_occ,
+    Dmax = D_max,
+    Dfinal = D_final,
+    DeltaD = Delta_D
+  )
+  
+  # Aggiungi i risultati alla lista
+  accumulation_results[[length(accumulation_results) + 1]] <- results
+}
+
+# Unisci tutti i risultati in un unico data frame per il primo script
+accumulation_final <- bind_rows(accumulation_results)
+
+# Percorso alla cartella contenente i file CSV per il secondo calcolo (Biased Ratio)
+folder_path_2 <- "C:/tesi/Specie virtuali/LOMBARDIA"
+
+# Elenco di tutti i file CSV nella cartella per il secondo calcolo
+csv_files_2 <- list.files(path = folder_path_2, pattern = "*.csv", full.names = TRUE)
+
+# Inizializza una lista per raccogliere i risultati dal secondo script
+biased_results <- list()
+
+# Ciclo su ogni file CSV per il secondo calcolo (Biased Ratio)
+for (file_path in csv_files_2) {
+  
+  # Carica i dati
+  data <- read.csv(file_path)
+  
+  # Verifica se le colonne 'BIASED' e 'UNBIASED' esistono
+  if (!("BIASED" %in% colnames(data)) | !("UNBIASED" %in% colnames(data))) {
+    cat("File ignorato (colonne 'BIASED' o 'UNBIASED' mancanti):", basename(file_path), "\n")
+    next  # Se non ci sono, passa al prossimo file
+  }
+  
+  # Calcola il numero totale di occorrenze e quelle biased
+  total_occurrences <- nrow(data)
+  biased_occurrences <- sum(data$BIASED == TRUE, na.rm = TRUE)
+  
+  # Estrai informazioni dal nome del file
+  file_info <- strsplit(basename(file_path), "_")[[1]]
+  species <- file_info[2]                # Specie è nella posizione 2
+  sp_prevalence <- as.numeric(file_info[5])  # Prevalence è nella posizione 5
+  
+  # Estrai il numero di occorrenze dal nome del file
+  n_occ <- as.numeric(str_extract(file_info[11], "\\d+"))  # Estrae il numero dopo "n_occ_"
+  
+  # Calcola il rapporto n. occorrenze biased / n. occorrenze totali
+  biased_ratio <- biased_occurrences / total_occurrences
+  
+  # Crea un data frame con i risultati per questo file
+  results <- data.frame(
+    Species = species,
+    SpeciesPrevalence = sp_prevalence,
+    N_Occurrences = n_occ,
+    BiasedRatio = biased_ratio
+  )
+  
+  # Aggiungi i risultati alla lista
+  biased_results[[length(biased_results) + 1]] <- results
+}
+
+# Unisci tutti i risultati in un unico data frame per il secondo script
+biased_final <- bind_rows(biased_results)
+
+# Unisci i due data frame sui risultati
+combined_results <- left_join(accumulation_final, biased_final, by = c("Species", "SpeciesPrevalence", "N_Occurrences"))
+
+# Percorso alla cartella dei risultati
+results_dir <- "C:/tesi/Specie virtuali/LOMBARDIA/results"
+if (!dir.exists(results_dir)) {
+  dir.create(results_dir)
+}
+
+# Nome del file di output
+output_file <- paste0(results_dir, "/combined_species_results_LOMBARDIA.csv")
+
+# Salva i risultati in un file CSV
+write.csv(combined_results, output_file, row.names = FALSE)
+
+# Messaggio di conferma
+cat("Risultati combinati salvati in:", output_file, "\n")
+
+################# GRAFICO 
+
+library(ggplot2)
+library(viridis)
+library(readr)
+
+# Percorso al file combinato della Lombardia
+file_path <- "C:/tesi/Specie virtuali/LOMBARDIA/results/combined_species_results_LOMBARDIA.csv"
+
+# Carica i dati dal file CSV creato precedentemente
+data <- read.csv(file_path)
+
+# Creazione del grafico con linea di tendenza rossa e correzione per eventuali warning
+ggplot(data, aes(x = BiasedRatio, y = DeltaD, color = SpeciesPrevalence)) +
+  geom_point(size = 3) +  # Aggiungi i punti
+  scale_color_viridis(option = "D") +  # Utilizza la gradazione di colore viridis per il SpeciesPrevalence
+  labs(
+    title = "Biased Ratio vs DeltaD (Lombardia)",
+    x = "Biased Ratio",
+    y = "DeltaD",
+    color = "Species Prevalence"
+  ) +
+  theme_minimal()  # Tema minimale per il grafico
+
+
+
+######################################################### MODELLI ################################################
+
+
+library(maps)
+library(terra)
+library(ggplot2)
+library(tidyverse)
+library(ggeffects)
+library(lme4)
+library(performance)
+library(mgcv)
+
+########## SICILIA #########
+
+setwd("C:/tesi/Specie virtuali/SICILIA/results")
+
+d <- read.csv("all_species_combined_results.csv")
+# %>% 
+#  pivot_longer(., cols = c("D", "I"), names_to = "Metric", values_to = "Value")
+
+
+# prima: relazione fra species prevalence e biased ratio
+hist(d$BiasedRatio, breaks = 40)
+
+# rapporto fra i due (prova lm, glm, gam)
+lm_d <- glm(BiasedRatio ~  SpeciesPrevalence, 
+            family = quasibinomial, 
+            data = d)
+
+summary(lm_d)           
+plot(residuals(lm_d))
+
+# RMSE
+residuals_glm <- residuals(lm_d, type = "response")
+
+# Calcolo del RMSE
+rmse_residuals <- sqrt(mean(residuals_glm^2))
+
+# Output del RMSE
+print(paste("RMSE dei residui:", rmse_residuals))
+
+
+# relazione fra delta d, biased ratio e species prevalence
+# deltaDI, biased ratio e species prevalence
+glm_d <- glm(DeltaD ~ BiasedRatio + SpeciesPrevalence, 
+             family = quasibinomial, 
+             data = d)
+
+summary(glm_d)
+
+plot(residuals(glm_d))
+
+
+# ggeffects 
+ggpredict(glm_d, terms = c("BiasedRatio[all]", "SpeciesPrevalence")) %>% 
+  plot() 
+
+
+ggpredict(glm_d, terms = c("SpeciesPrevalence", "BiasedRatio"))  %>% 
+  plot()
+
+
+# Modello GAM con smoothing su BiasedRatio e SpeciesPrevalence
+gam_d <- gam(DeltaD ~ s(BiasedRatio) + s(SpeciesPrevalence), 
+             family = quasibinomial, 
+             data = d)
+
+# Output del modello
+summary(gam_d)
+
+# Grafico dei termini smooth
+plot(gam_d, pages = 1)
+
+# Controllo diagnostico dei residui
+gam.check(gam_d)
+
+# Grafico dei residui
+plot(residuals(gam_d), main = "Residuals of GAM", ylab = "Residuals")
+
+# Residui del modello GAM
+residuals_gam <- residuals(gam_d, type = "response")
+
+# Calcolo dell'RMSE
+rmse_gam <- sqrt(mean(residuals_gam^2))
+
+# Output del RMSE
+print(paste("RMSE dei residui GAM:", rmse_gam))
+
+
+# Effetti stimati con ggeffects
+ggpredict(gam_d, terms = c("BiasedRatio[all]", "SpeciesPrevalence")) %>% plot()
+
+ggpredict(gam_d, terms = c("SpeciesPrevalence", "BiasedRatio")) %>% plot()
+
+
+########## LOMBARDIA #########
+
+
+setwd("C:/tesi/Specie virtuali/LOMBARDIA/results")
+
+d <- read.csv("combined_species_results_LOMBARDIA.csv")
+# %>% 
+#  pivot_longer(., cols = c("D", "I"), names_to = "Metric", values_to = "Value")
+
+
+# prima: relazione fra species prevalence e biased ratio
+hist(d$BiasedRatio, breaks = 40)
+
+# rapporto fra i due (prova lm, glm, gam)
+lm_d <- glm(BiasedRatio ~  SpeciesPrevalence, 
+            family = quasibinomial, 
+            data = d)
+
+summary(lm_d)           
+plot(residuals(lm_d))
+
+# RMSE
+residuals_glm <- residuals(lm_d, type = "response")
+
+# Calcolo del RMSE
+rmse_residuals <- sqrt(mean(residuals_glm^2))
+
+# Output del RMSE
+print(paste("RMSE dei residui:", rmse_residuals))
+
+
+# relazione fra delta d, biased ratio e species prevalence
+# deltaDI, biased ratio e species prevalence
+glm_d <- glm(DeltaD ~ BiasedRatio + SpeciesPrevalence, 
+             family = quasibinomial, 
+             data = d)
+
+summary(glm_d)
+
+plot(residuals(glm_d))
+
+
+# ggeffects 
+ggpredict(glm_d, terms = c("BiasedRatio[all]", "SpeciesPrevalence")) %>% 
+  plot() 
+
+
+ggpredict(glm_d, terms = c("SpeciesPrevalence", "BiasedRatio"))  %>% 
+  plot()
+
+
+# Modello GAM con smoothing su BiasedRatio e SpeciesPrevalence
+gam_d <- gam(DeltaD ~ s(BiasedRatio) + s(SpeciesPrevalence), 
+             family = quasibinomial, 
+             data = d)
+
+# Output del modello
+summary(gam_d)
+
+# Grafico dei termini smooth
+plot(gam_d, pages = 1)
+
+# Controllo diagnostico dei residui
+gam.check(gam_d)
+
+# Grafico dei residui
+plot(residuals(gam_d), main = "Residuals of GAM", ylab = "Residuals")
+
+# Residui del modello GAM
+residuals_gam <- residuals(gam_d, type = "response")
+
+# Calcolo dell'RMSE
+rmse_gam <- sqrt(mean(residuals_gam^2))
+
+# Output del RMSE
+print(paste("RMSE dei residui GAM:", rmse_gam))
+
+
+# Effetti stimati con ggeffects
+ggpredict(gam_d, terms = c("BiasedRatio[all]", "SpeciesPrevalence")) %>% plot()
+
+ggpredict(gam_d, terms = c("SpeciesPrevalence", "BiasedRatio")) %>% plot()
+
+
+
